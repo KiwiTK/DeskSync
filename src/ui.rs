@@ -7,6 +7,7 @@
 use crate::config::{Config, Edge, Peer};
 use crate::status;
 use eframe::egui;
+use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -27,8 +28,8 @@ pub fn run() -> io::Result<()> {
         "DeskSync",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([580.0, 560.0])
-                .with_min_inner_size([480.0, 420.0])
+                .with_inner_size([640.0, 720.0])
+                .with_min_inner_size([520.0, 560.0])
                 .with_icon(load_icon()),
             ..Default::default()
         },
@@ -37,7 +38,9 @@ pub fn run() -> io::Result<()> {
             Ok(Box::new(UiApp::new(cfg)))
         }),
     )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    // 窗口真正关掉后进程必须跟着走，不能赖在菜单栏里。
+    std::process::exit(0);
 }
 
 /// egui 内置字体不含 CJK 字形，中文会渲染成方块。
@@ -76,7 +79,10 @@ fn install_cjk_fonts(ctx: &egui::Context) {
             .font_data
             .insert("system-cjk".to_owned(), egui::FontData::from_owned(data).into());
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts.families.entry(family).or_default().push("system-cjk".to_owned());
+            let list = fonts.families.entry(family).or_default();
+            // 放到最前面：行高按它的度量算，中英文混排才不会叠行。
+            // CJK 字体自带拉丁字形，英文显示不受影响。
+            list.insert(0, "system-cjk".to_owned());
         }
         ctx.set_fonts(fonts);
         return;
@@ -165,6 +171,35 @@ struct UiApp {
     /// 托盘延后到事件循环转起来之后再建；建失败就记下来，不再反复重试。
     tray: Option<Tray>,
     tray_error: Option<String>,
+    /// 用户明确要求退出（托盘「退出」或 Cmd+Q），此时不再拦截关窗。
+    quitting: bool,
+    /// 布局画布里每台邻居相对本机中心的偏移（像素）。
+    positions: HashMap<String, egui::Vec2>,
+}
+
+/// 每条边对应的画布默认摆放偏移。
+fn default_offset(e: Edge) -> egui::Vec2 {
+    match e {
+        Edge::Left => egui::vec2(-150.0, 0.0),
+        Edge::Right => egui::vec2(150.0, 0.0),
+        Edge::Top => egui::vec2(0.0, -110.0),
+        Edge::Bottom => egui::vec2(0.0, 110.0),
+    }
+}
+
+/// 根据邻居相对本机的位置算出它该挂在哪条边上。
+fn edge_from_offset(d: egui::Vec2) -> Edge {
+    if d.x.abs() >= d.y.abs() {
+        if d.x >= 0.0 {
+            Edge::Right
+        } else {
+            Edge::Left
+        }
+    } else if d.y >= 0.0 {
+        Edge::Bottom
+    } else {
+        Edge::Top
+    }
 }
 
 const EDGE_LABELS: [&str; 4] = ["左", "右", "上", "下"];
@@ -197,6 +232,8 @@ impl UiApp {
             draft: Draft::default(),
             tray: None,
             tray_error: None,
+            quitting: false,
+            positions: HashMap::new(),
         }
     }
 
@@ -254,6 +291,8 @@ impl UiApp {
                     reclaim: false,
                     quit: true,
                 });
+                // 标记「真的要退」，关窗时不再被拦截成隐藏。
+                self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -271,8 +310,32 @@ impl eframe::App for UiApp {
             self.status = status::read_status();
         }
 
-        // 点关闭只是藏到菜单栏，真正退出走托盘菜单里的「退出」。
-        if ctx.input(|i| i.viewport().close_requested()) {
+        // 点关闭只是藏到菜单栏；托盘「退出」或 Cmd+Q 才真的退出。
+        let cmd_q = cfg!(target_os = "macos")
+            && ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key {
+                            key: egui::Key::Q,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if modifiers.command
+                    )
+                })
+            });
+        if cmd_q {
+            self.quitting = true;
+            self.poke(status::UiCommand {
+                pause: None,
+                reclaim: false,
+                quit: true,
+            });
+        }
+        if self.quitting {
+            // 不拦 Close，让窗口真的关掉；run_native 返回后进程会 exit(0)。
+        } else if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -284,15 +347,24 @@ impl eframe::App for UiApp {
             self.draw_status(ui);
 
             ui.add_space(8.0);
-            egui::CollapsingHeader::new("本机")
-                .default_open(true)
-                .show(ui, |ui| self.draw_self(ui));
-            egui::CollapsingHeader::new("屏幕布局与邻居")
-                .default_open(true)
-                .show(ui, |ui| self.draw_peers(ui));
-            egui::CollapsingHeader::new("证书与信任")
-                .default_open(false)
-                .show(ui, |ui| self.draw_trust(ui));
+            ui.heading("本机");
+            ui.separator();
+            self.draw_self(ui);
+
+            ui.add_space(8.0);
+            ui.heading("屏幕布局");
+            ui.separator();
+            self.draw_layout(ui);
+
+            ui.add_space(8.0);
+            ui.heading("邻居");
+            ui.separator();
+            self.draw_peers(ui);
+
+            ui.add_space(8.0);
+            ui.heading("证书与信任");
+            ui.separator();
+            self.draw_trust(ui);
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -402,6 +474,132 @@ impl UiApp {
             ui.checkbox(&mut self.cfg.auto_trust, "家用局域网建议开启");
             ui.end_row();
         });
+    }
+
+    /// 布局画布：本机居中，邻居是可拖动的"显示器"。
+    /// 拖到哪边，出口方向就自动设成哪边，保存后立即生效。
+    fn draw_layout(&mut self, ui: &mut egui::Ui) {
+        // 位置表和邻居列表保持同步：新邻居按当前边给个默认位置，删掉的清掉。
+        for p in &self.cfg.peers {
+            let entry = self.positions.entry(p.name.clone());
+            let edge = self.cfg.edges.get(&p.name).copied().unwrap_or(Edge::Right);
+            entry.or_insert_with(|| default_offset(edge));
+        }
+        self.positions
+            .retain(|name, _| self.cfg.peers.iter().any(|p| &p.name == name));
+
+        let canvas_w = ui.available_width();
+        let canvas_h = 190.0;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(canvas_w, canvas_h),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 8.0, ui.visuals().faint_bg_color);
+        painter.rect_stroke(rect, 8.0, ui.visuals().widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+
+        let center = rect.center();
+        let monitor = egui::vec2(92.0, 58.0);
+
+        // 本机
+        let self_rect = egui::Rect::from_center_size(center, monitor);
+        let self_fill = ui.visuals().widgets.active.bg_fill;
+        painter.rect_filled(self_rect, 6.0, self_fill);
+        painter.rect_stroke(self_rect, 6.0, ui.visuals().widgets.active.bg_stroke, egui::StrokeKind::Inside);
+        painter.text(
+            self_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{}\n本机", self.cfg.name),
+            egui::TextStyle::Body.resolve(ui.style()),
+            ui.visuals().strong_text_color(),
+        );
+
+        let mut changed_edge: Option<(String, Edge)> = None;
+
+        for p in self.cfg.peers.clone() {
+            let Some(pos) = self.positions.get(&p.name).copied() else {
+                continue;
+            };
+            // 位置限制在画布内
+            let max_dx = canvas_w / 2.0 - monitor.x / 2.0 - 4.0;
+            let max_dy = canvas_h / 2.0 - monitor.y / 2.0 - 4.0;
+            let pos = egui::vec2(
+                pos.x.clamp(-max_dx, max_dx),
+                pos.y.clamp(-max_dy, max_dy),
+            );
+
+            let peer_rect = egui::Rect::from_center_size(center + pos, monitor);
+            let connected = self
+                .status
+                .as_ref()
+                .map(|s| s.connected.iter().any(|c| c == &p.name))
+                .unwrap_or(false);
+            let fill = if connected {
+                egui::Color32::from_rgb(40, 150, 100)
+            } else {
+                ui.visuals().widgets.inactive.bg_fill
+            };
+
+            // 连线：本机边中点 -> 邻居边中点
+            let edge_now = self.cfg.edges.get(&p.name).copied().unwrap_or(Edge::Right);
+            let (a, b) = match edge_now {
+                Edge::Right => (
+                    self_rect.right_center(),
+                    peer_rect.left_center(),
+                ),
+                Edge::Left => (
+                    self_rect.left_center(),
+                    peer_rect.right_center(),
+                ),
+                Edge::Top => (
+                    egui::pos2(self_rect.center().x, self_rect.top()),
+                    egui::pos2(peer_rect.center().x, peer_rect.bottom()),
+                ),
+                Edge::Bottom => (
+                    egui::pos2(self_rect.center().x, self_rect.bottom()),
+                    egui::pos2(peer_rect.center().x, peer_rect.top()),
+                ),
+            };
+            painter.line_segment([a, b], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 220)));
+
+            painter.rect_filled(peer_rect, 6.0, fill);
+            painter.rect_stroke(peer_rect, 6.0, ui.visuals().widgets.inactive.bg_stroke, egui::StrokeKind::Inside);
+            let dot = if connected { "● " } else { "○ " };
+            painter.text(
+                peer_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{dot}{}\n{}", p.name, EDGE_LABELS[index_of(edge_now)]),
+                egui::TextStyle::Body.resolve(ui.style()),
+                ui.visuals().strong_text_color(),
+            );
+
+            // 拖动
+            let id = egui::Id::new(("layout_peer", p.name.clone()));
+            let resp = ui.interact(peer_rect, id, egui::Sense::drag());
+            if resp.dragged() {
+                let new_pos = pos + resp.drag_delta();
+                self.positions.insert(p.name.clone(), new_pos);
+                let edge = edge_from_offset(new_pos);
+                if self.cfg.edges.get(&p.name).copied() != Some(edge) {
+                    self.cfg.edges.insert(p.name.clone(), edge);
+                    changed_edge = Some((p.name.clone(), edge));
+                }
+            }
+            if resp.hovered() {
+                painter.text(
+                    peer_rect.left_top() + egui::vec2(0.0, -14.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    "拖动改变位置",
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    ui.visuals().weak_text_color(),
+                );
+            }
+        }
+
+        if let Some((name, edge)) = changed_edge {
+            self.notice = format!("{name} 已放到{}侧，保存后生效。", EDGE_LABELS[index_of(edge)]);
+        }
+        ui.small("把邻居的屏幕拖到对应的一侧，出口方向自动跟着变；绿框表示已连接。");
     }
 
     fn draw_peers(&mut self, ui: &mut egui::Ui) {

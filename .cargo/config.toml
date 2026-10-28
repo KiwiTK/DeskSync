@@ -1,0 +1,7 @@
+# Windows 构建静态链接 CRT：用户机器上没有 VC++ 运行库（vcruntime140.dll）也能直接双击运行。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[alias]
+# 本地快速验证界面：cargo ui
+ui = "run --release --features ui"
