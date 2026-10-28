@@ -11,6 +11,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  BIN_FEATURES: --features ui
 
 jobs:
   # macOS 单独一个 job：Apple Silicon 机器上交叉编译 x86_64，再 lipo 成通用二进制。
@@ -29,8 +30,8 @@ jobs:
         with:
           key: macos-universal
 
-      - run: cargo build --release --locked --features ui --target aarch64-apple-darwin
-      - run: cargo build --release --locked --features ui --target x86_64-apple-darwin
+      - run: cargo build --release --locked $BIN_FEATURES --target aarch64-apple-darwin
+      - run: cargo build --release --locked $BIN_FEATURES --target x86_64-apple-darwin
 
       - name: Build app bundle, dmg and pkg
         run: |
@@ -43,6 +44,67 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  windows:
+    name: Windows-x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+
+      - name: Build
+        run: cargo build --release --locked $BIN_FEATURES
+
+      - name: Verify the binary starts
+        shell: pwsh
+        run: |
+          & .\target\release\desksync.exe status
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = $env:GITHUB_REF_NAME -replace '^v',''
+          if ($ref -eq $env:GITHUB_REF_NAME) {
+            $ref = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          }
+          "value=$ref" >> $env:GITHUB_OUTPUT
+
+      # 便携版：解压即用，不需要安装
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $name = "DeskSync-${{ steps.ver.outputs.value }}-Windows-x64-portable"
+          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
+          Copy-Item target/release/desksync.exe "dist/$name/"
+          Copy-Item README.md, LICENSE "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse "dist/$name"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist/$name.zip.sha256" -Value $hash -NoNewline
+
+      # 安装器：Inno Setup（runner 自带）
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "找不到 ISCC：$iscc" }
+          & $iscc "packaging\windows.iss" "/DMyAppVersion=${{ steps.ver.outputs.value }}"
+          $exe = "dist\DeskSync-${{ steps.ver.outputs.value }}-Windows-x64-Setup.exe"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$exe.sha256" -Value $hash -NoNewline
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeskSync-Windows-x64
+          path: dist/*
+          if-no-files-found: error
+
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
@@ -50,9 +112,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            label: Windows-x64
-            target: x86_64-pc-windows-msvc
           - os: ubuntu-latest
             label: Linux-x64
             target: x86_64-unknown-linux-gnu
@@ -72,7 +131,6 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Linux system dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           # X11：键鼠捕获；GTK/AppIndicator：托盘图标；xcb/xkbcommon：窗口
@@ -81,41 +139,15 @@ jobs:
             libxcb-xfixes0-dev libxkbcommon-dev
 
       - name: Build
-        run: cargo build --release --locked --features ui --target ${{ matrix.target }}
+        run: cargo build --release --locked $BIN_FEATURES --target ${{ matrix.target }}
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         shell: bash
         run: |
-          set -euo pipefail
+          chmod +x scripts/package-linux.sh
           version="${GITHUB_REF_NAME#v}"
           [ "$version" = "${GITHUB_REF_NAME}" ] && version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
-          mkdir -p staged
-          cp "target/${{ matrix.target }}/release/desksync" staged/desksync
-          name="DeskSync-$version-${{ matrix.label }}"
-          mkdir -p "dist/$name"
-          cp staged/desksync "dist/$name/desksync"
-          cp README.md LICENSE "dist/$name/"
-          tar -czf "dist/$name.tar.gz" -C dist "$name"
-          rm -rf "dist/$name"
-          shasum -a 256 "dist/$name.tar.gz" | awk '{print $1}' > "dist/$name.tar.gz.sha256"
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ref = $env:GITHUB_REF_NAME -replace '^v',''
-          if ($ref -eq $env:GITHUB_REF_NAME) {
-            $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
-          } else { $version = $ref }
-          $name = "DeskSync-$version-${{ matrix.label }}"
-          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/desksync.exe" "dist/$name/"
-          Copy-Item README.md, LICENSE "dist/$name/"
-          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
-          Remove-Item -Recurse "dist/$name"
-          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "dist/$name.zip.sha256" -Value $hash -NoNewline
+          ./scripts/package-linux.sh "${{ matrix.target }}" "$version"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -125,7 +157,7 @@ jobs:
 
   release:
     name: publish release
-    needs: [macos, build]
+    needs: [macos, windows, build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -137,7 +169,7 @@ jobs:
       - name: Collect checksums
         run: |
           cd dist
-          sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          sha256sum *.tar.gz *.zip *.dmg *.pkg *.exe > SHA256SUMS.txt
           ls -lh
 
       - uses: softprops/action-gh-release@v2

@@ -1,6 +1,6 @@
 [package]
 name = "desksync"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Share one keyboard, mouse and clipboard across Windows, macOS and Linux over LAN"
 license = "MIT"
@@ -38,3 +38,6 @@ strip = "symbols"
 [features]
 # 图形界面（菜单栏图标 + 设置窗口）。不带这个特性编译出来的还是 1.3MB 的纯命令行内核。
 ui = ["dep:eframe", "dep:tray-icon", "dep:muda", "dep:image"]
+
+[build-dependencies]
+winresource = "0.1.34"

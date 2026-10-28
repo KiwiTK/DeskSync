@@ -21,14 +21,23 @@
 
 从 [Releases](https://github.com/KiwiTK/DeskSync/releases) 下载对应平台的安装包。
 
-| 电脑 | 推荐 | 另一个选择 | 免安装压缩包 |
-| --- | --- | --- | --- |
-| macOS 13+（通用包，Apple Silicon 与 Intel 都能用） | `DeskSync-<版本>-macOS-universal.dmg`（打开后把 DeskSync 拖进 Applications） | `DeskSync-<版本>-macOS-universal.pkg`（安装器，装到 `/Applications`） | `DeskSync-<版本>-macOS-universal.tar.gz` |
-| Windows 10/11 x64 | `DeskSync-<版本>-Windows-x64.zip`（解压后双击 `desksync.exe`） | — | 同上 |
-| Linux x64 | `DeskSync-<版本>-Linux-x64.tar.gz` | — | 同上 |
-| Linux ARM64 | `DeskSync-<版本>-Linux-arm64.tar.gz` | — | 同上 |
+| 电脑 | 推荐 | 免安装 / 其他 |
+| --- | --- | --- |
+| macOS 13+（通用包，Apple Silicon 与 Intel 都能用） | `DeskSync-<版本>-macOS-universal.dmg`（打开后把 DeskSync 拖进 Applications） | `DeskSync-<版本>-macOS-universal.pkg`（安装器，装到 `/Applications`） |
+| Windows 10/11 x64 | `DeskSync-<版本>-Windows-x64-Setup.exe`（安装器，可选开机自启、桌面快捷方式） | `DeskSync-<版本>-Windows-x64-portable.zip`（解压后双击 `desksync.exe`） |
+| Linux x64 | `DeskSync-<版本>-Linux-x64.tar.gz` | 包内 `install.sh` 装好图标和启动器 |
+| Linux ARM64 | `DeskSync-<版本>-Linux-arm64.tar.gz` | 同上 |
 
 每个正式包都带 `.sha256`，Release 里还有汇总的 `SHA256SUMS.txt`。
+
+Linux 上装桌面图标和启动器：
+
+```bash
+tar -xzf DeskSync-<版本>-Linux-x64.tar.gz
+cd DeskSync-<版本>-Linux-x64
+./install.sh                 # 装到 ~/.local，不需要 root
+sudo ./install.sh --system   # 或装到 /usr/local
+```
 
 **macOS**：首次打开会被 Gatekeeper 拦（没有 Apple 公证）。到「系统设置 → 隐私与安全性」点「仍要打开」，或者先解除隔离属性：
 
@@ -46,7 +55,9 @@ Linux 上键鼠捕获依赖 X11（Xorg）会话；Wayland 会话下注入不可�
 
 ## 界面
 
-安装完是一个普通桌面应用：**菜单栏（Windows 托盘）常驻一个图标，右下角 Browse 里能看到它**。装完不会有 Dock 图标，这是刻意的——它在菜单栏，不在 Dock。
+安装完是一个普通桌面应用：**macOS 在屏幕顶部菜单栏、Windows 在任务栏右下角的托盘区、Linux 在状态栏常驻一个图标**。macOS 和 Linux 上不会有 Dock / 任务栏窗口，这是刻意的——共享工具该待在角落里，不占地方。
+
+关掉设置窗口只是把它**藏起来**，进程还在菜单栏继续干活；要彻底退出，用托盘菜单里的「退出」（那会连后台服务一起停掉）。
 
 点托盘图标里的「打开 DeskSync」弹出设置窗口，能看到：
 

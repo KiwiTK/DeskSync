@@ -21,9 +21,8 @@ pub fn run() -> io::Result<()> {
         std::thread::sleep(Duration::from_millis(700));
     }
 
-    let tray = build_tray()?;
-    let app = UiApp::new(cfg, tray);
-
+    // 托盘不能在这里建：macOS 的 NSStatusItem 要等 NSApplication 起来之后才能创建，
+    // 在 run_native 之前碰它会直接崩在 CGSConnectionByID。所以推迟到第一帧。
     eframe::run_native(
         "DeskSync",
         eframe::NativeOptions {
@@ -33,7 +32,7 @@ pub fn run() -> io::Result<()> {
                 .with_icon(load_icon()),
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(app))),
+        Box::new(move |_cc| Ok(Box::new(UiApp::new(cfg)))),
     )
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
 }
@@ -116,7 +115,9 @@ struct UiApp {
     last_poll: Instant,
     notice: String,
     draft: Draft,
-    tray: Tray,
+    /// 托盘延后到事件循环转起来之后再建；建失败就记下来，不再反复重试。
+    tray: Option<Tray>,
+    tray_error: Option<String>,
 }
 
 const EDGE_LABELS: [&str; 4] = ["左", "右", "上", "下"];
@@ -140,14 +141,29 @@ fn index_of(e: Edge) -> usize {
 }
 
 impl UiApp {
-    fn new(cfg: Config, tray: Tray) -> Self {
+    fn new(cfg: Config) -> Self {
         Self {
             cfg,
             status: None,
             last_poll: Instant::now() - Duration::from_secs(9),
             notice: String::new(),
             draft: Draft::default(),
-            tray,
+            tray: None,
+            tray_error: None,
+        }
+    }
+
+    /// 第一帧才建托盘：此时 NSApplication 已经在跑，NSStatusItem 可以安全创建。
+    fn ensure_tray(&mut self) {
+        if self.tray.is_some() || self.tray_error.is_some() {
+            return;
+        }
+        match build_tray() {
+            Ok(tray) => self.tray = Some(tray),
+            Err(e) => {
+                eprintln!("创建菜单栏图标失败: {e}");
+                self.tray_error = Some(e.to_string());
+            }
         }
     }
 
@@ -165,24 +181,27 @@ impl UiApp {
 
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         // macOS 上这些事件必须靠界面这一侧的事件循环来取，托盘自己没有线程。
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
         while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-            if ev.id == *self.tray.open.id() {
+            if ev.id == *tray.open.id() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            } else if ev.id == *self.tray.pause.id() {
+            } else if ev.id == *tray.pause.id() {
                 let paused = self.status.as_ref().map(|s| s.paused).unwrap_or(false);
                 self.poke(status::UiCommand {
                     pause: Some(!paused),
                     reclaim: false,
                     quit: false,
                 });
-            } else if ev.id == *self.tray.reclaim.id() {
+            } else if ev.id == *tray.reclaim.id() {
                 self.poke(status::UiCommand {
                     pause: None,
                     reclaim: true,
                     quit: false,
                 });
-            } else if ev.id == *self.tray.quit.id() {
+            } else if ev.id == *tray.quit.id() {
                 self.poke(status::UiCommand {
                     pause: None,
                     reclaim: false,
@@ -197,6 +216,7 @@ impl UiApp {
 
 impl eframe::App for UiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ensure_tray();
         self.handle_tray_events(ctx);
 
         if self.last_poll.elapsed() > Duration::from_millis(400) {

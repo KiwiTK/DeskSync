@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DeskSync
+GenericName=键鼠共享
+Comment=让局域网里的几台电脑共用一套键鼠和剪贴板
+Exec=desksync
+TryExec=desksync
+Icon=desksync
+Terminal=false
+StartupNotify=false
+Categories=Utility;Network;Settings;
+Keywords=KVM;mouse;keyboard;clipboard;share;LAN;
