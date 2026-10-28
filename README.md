@@ -23,8 +23,7 @@
 | 电脑 | 文件 |
 | --- | --- |
 | Windows 10/11 x64 | `DeskSync-<版本>-Windows-x64.zip` |
-| Apple Silicon Mac | `DeskSync-<版本>-macOS-arm64.tar.gz` |
-| Intel Mac | `DeskSync-<版本>-macOS-x86_64.tar.gz` |
+| macOS 13+（通用包，Apple Silicon 与 Intel 都能用） | `DeskSync-<版本>-macOS-universal.tar.gz` |
 | Linux x64 | `DeskSync-<版本>-Linux-x64.tar.gz` |
 | Linux ARM64 | `DeskSync-<版本>-Linux-arm64.tar.gz` |
 
