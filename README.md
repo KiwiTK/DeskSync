@@ -169,6 +169,24 @@ Linux 上键鼠捕获依赖 X11（Xorg）会话；Wayland 会话下注入不可�
 - **Windows**：不需要额外授权，但以管理员权限运行时，无法控制以更高完整性级别运行的窗口（UAC 弹窗等）。普通用户权限即可正常使用。
 - **Linux**：需要 X11 会话（Wayland 会话下键鼠注入不可用，请切换到 Xorg 登录）。
 
+## 排障
+
+程序出问题时先看日志，界面进程和后台服务都写同一个文件：
+
+| 系统 | 日志位置 |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\DeskSync\desksync.log` |
+| macOS | `~/Library/Application Support/DeskSync/desksync.log` |
+| Linux | `~/.config/desksync/desksync.log` |
+
+- 界面点不开、一闪而过：看日志最后的 `PANIC` 或 `启动失败`。Windows 上启动失败还会弹一个错误框，把里面的文字发出来即可。
+- **Windows 图标显示不对（白角、旧图）**：多半是系统的图标缓存，换版本后不会自动刷新。管理员 PowerShell 里跑：
+
+  ```powershell
+  ie4uinit.exe -show
+  taskkill /f /im explorer.exe; start explorer.exe
+  ```
+
 ## 快捷键
 
 | 操作 | 快捷键 |

@@ -1,8 +1,13 @@
+// Windows 上编译成 GUI 子系统：双击不弹黑框。需要终端输出时靠
+// attach_parent_console() 附着到父控制台，`desksync status` 在 PowerShell 里照样能打印。
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod clipboard;
 mod config;
 mod cursor;
 mod discovery;
 mod identity;
+mod log;
 mod proto;
 mod session;
 mod status;
@@ -37,9 +42,15 @@ enum Msg {
 }
 
 fn main() {
+    attach_parent_console();
+
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     let no_input = args.iter().any(|a| a == "--no-input");
     args.retain(|a| a != "--no-input");
+
+    // 日志和 panic 钩子必须最先装上：GUI 进程崩溃时这是唯一的现场。
+    log::init();
+
     let cmd = args.first().cloned().unwrap_or_default();
 
     let result = match cmd.as_str() {
@@ -55,6 +66,7 @@ fn main() {
         }
     };
     if let Err(e) = result {
+        log::write(&format!("命令 {cmd:?} 失败: {e}"));
         eprintln!("失败: {e}");
         std::process::exit(1);
     }
@@ -64,6 +76,22 @@ fn main() {
 fn bootstrap() -> std::io::Result<()> {
     ui::run()
 }
+
+/// 从终端启动时把 stdout/stderr 接回父控制台，双击启动时静默失败即可。
+#[cfg(windows)]
+fn attach_parent_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
 
 #[cfg(not(feature = "ui"))]
 fn bootstrap() -> std::io::Result<()> {
@@ -129,6 +157,10 @@ fn run(no_input: bool) -> std::io::Result<()> {
     println!("  名称 {}  端口 {}  屏幕 {}x{}", cfg.name, cfg.port, w, h);
     println!("  证书指纹 {}", id.fingerprint);
     println!("  配置文件 {}", Config::path().display());
+    crate::log::write(&format!(
+        "后台: 配置与证书就绪 名称={} 端口={} 屏幕={w}x{h} no_input={no_input}",
+        cfg.name, cfg.port
+    ));
 
     if no_input {
         println!("  --no-input：不捕获也不注入键鼠");
@@ -139,7 +171,9 @@ fn run(no_input: bool) -> std::io::Result<()> {
                 let _ = tx.send(Msg::Input(ev.event_type));
             });
             if let Err(e) = result {
-                eprintln!("输入捕获失败，请检查系统权限（辅助功能 / 输入监控）: {e:?}");
+                let hint = "输入捕获失败，请检查系统权限（辅助功能 / 输入监控）";
+                eprintln!("{hint}: {e:?}");
+                crate::log::write(&format!("{hint}: {e:?}"));
             }
         });
     }
@@ -148,11 +182,13 @@ fn run(no_input: bool) -> std::io::Result<()> {
     let (beacon_tx, beacon_rx) = mpsc::channel::<(String, IpAddr, u16)>();
     if let Err(e) = discovery::spawn(cfg.name.clone(), cfg.port, beacon_tx) {
         eprintln!("局域网发现未启用: {e}");
+        crate::log::write(&format!("局域网发现未启用: {e}"));
     }
 
     // 入站连接
     let listener: TcpListener = transport::listen(cfg.port)?;
     let server_cfg = transport::server_config(&id, trust.clone())?;
+    crate::log::write(&format!("后台: 端口 {} 监听就绪", cfg.port));
     let our_name = cfg.name.clone();
     let accept_tx = msg_tx.clone();
     thread::spawn(move || {

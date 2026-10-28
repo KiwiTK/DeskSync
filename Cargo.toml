@@ -1,6 +1,6 @@
 [package]
 name = "desksync"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Share one keyboard, mouse and clipboard across Windows, macOS and Linux over LAN"
 license = "MIT"
@@ -27,13 +27,16 @@ serde_json = "1"
 sha2 = "0.11.1"
 tray-icon = { version = "0.20", optional = true }
 
-# 体积优先：最小体积优化 + 全量 LTO + 单编译单元 + 去掉符号表。
+# 体积优先：最小体积优化 + 全量 LTO + 单编译单元。
+# panic 用 unwind 而不是 abort：某个连接线程出问题时不该把整个后台服务一起带走。
+# 只剥 DWARF、保留符号表，这样崩溃日志里的 backtrace 才有函数名可看；
+# 等 Windows 启动问题彻底查清后可以改回 strip = "symbols"，还能再小一点。
 [profile.release]
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
-panic = "abort"
-strip = "symbols"
+panic = "unwind"
+strip = "debuginfo"
 
 [features]
 # 图形界面（菜单栏图标 + 设置窗口）。不带这个特性编译出来的还是 1.3MB 的纯命令行内核。

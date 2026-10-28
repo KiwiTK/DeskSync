@@ -14,17 +14,22 @@ use std::time::{Duration, Instant};
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-128.png");
 
 pub fn run() -> io::Result<()> {
+    crate::log::write("界面进程启动");
     let cfg = Config::load().unwrap_or_default();
 
     // 后台服务没在跑就先拉起来，界面退出后它继续干活。
     if !status::daemon_alive() {
+        crate::log::write("后台未运行，正在拉起");
         spawn_daemon()?;
         std::thread::sleep(Duration::from_millis(700));
+    } else {
+        crate::log::write("后台已在运行");
     }
 
     // 托盘不能在这里建：macOS 的 NSStatusItem 要等 NSApplication 起来之后才能创建，
     // 在 run_native 之前碰它会直接崩在 CGSConnectionByID。所以推迟到第一帧。
-    eframe::run_native(
+    crate::log::write("进入图形事件循环");
+    let opened = eframe::run_native(
         "DeskSync",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
@@ -37,8 +42,17 @@ pub fn run() -> io::Result<()> {
             install_cjk_fonts(&cc.egui_ctx);
             Ok(Box::new(UiApp::new(cfg)))
         }),
-    )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    );
+    if let Err(e) = &opened {
+        // 界面起不来也要留下线索：写日志，Windows 上再弹个框让人看得见。
+        let log_path = crate::log::path_display();
+        crate::log::write(&format!("图形事件循环启动失败: {e}"));
+        crate::log::show_error(&format!(
+            "DeskSync 界面启动失败：{e}\n\n后台共享服务不受影响，仍在运行。\n\n详细日志：{log_path}"
+        ));
+    } else {
+        crate::log::write("图形事件循环正常退出");
+    }
     // 窗口真正关掉后进程必须跟着走，不能赖在菜单栏里。
     std::process::exit(0);
 }

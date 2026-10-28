@@ -1,5 +1,5 @@
 ; DeskSync Windows 安装器（Inno Setup）
-; 由 CI 调用：ISCC packaging/windows.iss /DMyAppVersion=0.2.0
+; 由 CI 调用：ISCC packaging/windows.iss /DMyAppVersion=<版本号>
 
 #define MyAppName "DeskSync"
 #define MyAppPublisher "KiwiTK"
