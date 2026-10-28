@@ -16,12 +16,16 @@ path = "src/main.rs"
 
 [dependencies]
 arboard = "3"
+eframe = { version = "0.31", optional = true }
+image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
+muda = { version = "0.16", optional = true }
 rcgen = { version = "0.13", features = ["crypto", "ring"] }
 rdev = { version = "0.5", features = ["serialize"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.1"
+tray-icon = { version = "0.20", optional = true }
 
 # 体积优先：最小体积优化 + 全量 LTO + 单编译单元 + 去掉符号表。
 [profile.release]
@@ -30,3 +34,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[features]
+# 图形界面（菜单栏图标 + 设置窗口）。不带这个特性编译出来的还是 1.3MB 的纯命令行内核。
+ui = ["dep:eframe", "dep:tray-icon", "dep:muda", "dep:image"]

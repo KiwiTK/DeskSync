@@ -74,6 +74,31 @@ impl Session {
         }
     }
 
+    /// UI 在配置文件改完后调用：新的屏幕边对应关系直接生效，不用重启。
+    pub fn set_edges(&mut self, edges: HashMap<String, Edge>) {
+        self.edges = edges;
+        self.edge_streak = 0;
+    }
+
+    /// 把控制权从当前被控制的机器上收回来。本机不是主导方时返回 false。
+    pub fn force_return(&mut self) -> bool {
+        if let Mode::Forwarding { peer } = self.mode.clone() {
+            self.reclaim(&peer);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 给 UI 看的状态标签。
+    pub fn mode_str(&self) -> String {
+        match &self.mode {
+            Mode::Local => "local".to_string(),
+            Mode::Forwarding { peer } => format!("forwarding:{peer}"),
+            Mode::Controlled { peer, .. } => format!("controlled:{peer}"),
+        }
+    }
+
     fn send(&self, peer: &str, frame: Frame) -> bool {
         match self.peers.get(peer) {
             Some(tx) => tx.send(frame).is_ok(),

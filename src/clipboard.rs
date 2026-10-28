@@ -46,3 +46,8 @@ fn write_text(text: &str) {
         let _ = board.set_text(text.to_string());
     }
 }
+
+/// 界面上的「复制」按钮用：把一段文本塞进系统剪贴板。
+pub fn copy_text(text: &str) {
+    write_text(text);
+}

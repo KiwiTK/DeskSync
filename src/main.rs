@@ -5,7 +5,11 @@ mod discovery;
 mod identity;
 mod proto;
 mod session;
+mod status;
 mod transport;
+
+#[cfg(feature = "ui")]
+mod ui;
 
 use config::Config;
 use identity::Identity;
@@ -17,7 +21,7 @@ use std::net::{IpAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use transport::{TrustState, read_frame, write_frame};
 
 /// 主线程收到的所有消息。
@@ -36,17 +40,34 @@ fn main() {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     let no_input = args.iter().any(|a| a == "--no-input");
     args.retain(|a| a != "--no-input");
-    let cmd = args.first().cloned().unwrap_or_else(|| "run".to_string());
+    let cmd = args.first().cloned().unwrap_or_default();
 
     let result = match cmd.as_str() {
         "init" => cmd_init(&args),
         "status" => cmd_status(),
-        _ => run(no_input),
+        "run" => run(no_input),
+        // 不带参数：带了界面的构建打开界面（顺带拉起后台服务），纯命令行构建直接后台跑。
+        "" | "ui" => bootstrap(),
+        other => {
+            eprintln!("未知命令: {other}");
+            eprintln!("用法: desksync [init <名字> | status | run | ui] [--no-input]");
+            std::process::exit(1);
+        }
     };
     if let Err(e) = result {
         eprintln!("失败: {e}");
         std::process::exit(1);
     }
+}
+
+#[cfg(feature = "ui")]
+fn bootstrap() -> std::io::Result<()> {
+    ui::run()
+}
+
+#[cfg(not(feature = "ui"))]
+fn bootstrap() -> std::io::Result<()> {
+    run(false)
 }
 
 fn cmd_init(args: &[String]) -> std::io::Result<()> {
@@ -202,32 +223,81 @@ fn run(no_input: bool) -> std::io::Result<()> {
 
     let mut clipboard = clipboard::Clipboard::new();
     let mut last_clip = Instant::now();
+    let mut last_tick = Instant::now();
+    let mut cfg_stamp = config_stamp();
+    let screen = (w.round() as u32, h.round() as u32);
 
-    for msg in msg_rx {
-        match msg {
-            Msg::Input(ev) => session.handle_local(&ev),
-            Msg::Frame(peer, frame) => {
-                if let Frame::Clipboard { text } = &frame {
-                    clipboard.adopt(text);
-                } else {
-                    session.handle_frame(&peer, frame);
+    loop {
+        match msg_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(msg) => match msg {
+                Msg::Input(ev) => session.handle_local(&ev),
+                Msg::Frame(peer, frame) => {
+                    if let Frame::Clipboard { text } = &frame {
+                        clipboard.adopt(text);
+                    } else {
+                        session.handle_frame(&peer, frame);
+                    }
+                }
+                Msg::Attach(name, tx) => {
+                    if session.peers.contains_key(&name) {
+                        // 已有同名连接，丢掉新通道让那个线程退出
+                        drop(tx);
+                    } else {
+                        println!("已连接: {name}");
+                        connected.lock().unwrap().insert(name.clone());
+                        session.connect(name, tx);
+                    }
+                }
+                Msg::Detach(name) => {
+                    println!("已断开: {name}");
+                    connected.lock().unwrap().remove(&name);
+                    session.disconnect(&name);
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        // 定期家务：处理界面发来的指令、重载配置、刷新状态文件。
+        if last_tick.elapsed() >= Duration::from_millis(300) {
+            last_tick = Instant::now();
+
+            if let Some(cmd) = status::take_command() {
+                if let Some(p) = cmd.pause {
+                    session.paused = p;
+                    println!("{}", if p { "已暂停共享" } else { "已继续共享" });
+                }
+                if cmd.reclaim && session.force_return() {
+                    println!("已收回控制");
+                }
+                if cmd.quit {
+                    return Ok(());
                 }
             }
-            Msg::Attach(name, tx) => {
-                if session.peers.contains_key(&name) {
-                    // 已有同名连接，丢掉新通道让那个线程退出
-                    drop(tx);
-                    continue;
+
+            let stamp = config_stamp();
+            if stamp != cfg_stamp {
+                cfg_stamp = stamp;
+                match Config::load() {
+                    Ok(new_cfg) => {
+                        session.set_edges(new_cfg.edges.clone());
+                        println!("配置已重载，无需重启");
+                    }
+                    Err(e) => eprintln!("配置读取失败，沿用旧配置: {e}"),
                 }
-                println!("已连接: {name}");
-                connected.lock().unwrap().insert(name.clone());
-                session.connect(name, tx);
             }
-            Msg::Detach(name) => {
-                println!("已断开: {name}");
-                connected.lock().unwrap().remove(&name);
-                session.disconnect(&name);
-            }
+
+            let names: Vec<String> = connected.lock().unwrap().iter().cloned().collect();
+            let _ = status::write_status(&status::Status {
+                name: cfg.name.clone(),
+                port: cfg.port,
+                fingerprint: id.fingerprint.clone(),
+                screen,
+                paused: session.paused,
+                mode: session.mode_str(),
+                connected: names,
+                written_ms: 0,
+            });
         }
 
         if last_clip.elapsed() > Duration::from_millis(400) {
@@ -238,6 +308,13 @@ fn run(no_input: bool) -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+/// 配置文件的修改时间，用来判断界面是不是改动过它。
+fn config_stamp() -> Option<SystemTime> {
+    std::fs::metadata(Config::path())
+        .ok()
+        .and_then(|m| m.modified().ok())
 }
 
 /// 读超时 / 非阻塞 / 中断都当作“暂时没数据”，继续轮询。

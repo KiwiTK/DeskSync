@@ -1,4 +1,9 @@
 /target
 *.tar.gz
 *.zip
+*.dmg
+*.pkg
 /dist
+/DeskSync.app
+.dmgroot
+.pkgroot

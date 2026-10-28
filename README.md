@@ -8,8 +8,9 @@
 
 ## 特性
 
-- **单文件**：一个可执行程序，1 MB 出头，解压即用。不依赖 Python、.NET、Java 或其他运行时。
+- **单文件**：一个可执行程序。纯命令行内核只有 1 MB 出头，带上图形界面也就几 MB。不依赖 Python、.NET、Java 或其他运行时。
 - **跨平台**：Windows 10/11（x64）、macOS 13+（Apple Silicon / Intel）、Linux（X11，x64 / ARM64）。
+- **有界面也有命令行**：菜单栏图标 + 设置窗口，改完配置当即生效；不想装界面时用 `desksync run` 一样能跑，两者可以随时切换。
 - **mTLS 双向认证**：每台机器首次启动时自签一张 P-256 证书，连接双方互相验证证书指纹。没有 CA，也没有中间服务器。
 - **局域网直连**：UDP 广播自动发现同一网段内的其他机器，也可以手动填 IP。数据不出局域网。
 - **相对位移转发**：鼠标按移动量转发而不是绝对坐标，两台分辨率不同的机器也能对得上。
@@ -18,29 +19,49 @@
 
 ## 下载
 
-从 [Releases](https://github.com/KiwiTK/DeskSync/releases) 下载对应平台的压缩包，解压得到 `desksync`（Windows 为 `desksync.exe`）。
+从 [Releases](https://github.com/KiwiTK/DeskSync/releases) 下载对应平台的安装包。
 
-| 电脑 | 文件 |
-| --- | --- |
-| Windows 10/11 x64 | `DeskSync-<版本>-Windows-x64.zip` |
-| macOS 13+（通用包，Apple Silicon 与 Intel 都能用） | `DeskSync-<版本>-macOS-universal.tar.gz` |
-| Linux x64 | `DeskSync-<版本>-Linux-x64.tar.gz` |
-| Linux ARM64 | `DeskSync-<版本>-Linux-arm64.tar.gz` |
+| 电脑 | 推荐 | 另一个选择 | 免安装压缩包 |
+| --- | --- | --- | --- |
+| macOS 13+（通用包，Apple Silicon 与 Intel 都能用） | `DeskSync-<版本>-macOS-universal.dmg`（打开后把 DeskSync 拖进 Applications） | `DeskSync-<版本>-macOS-universal.pkg`（安装器，装到 `/Applications`） | `DeskSync-<版本>-macOS-universal.tar.gz` |
+| Windows 10/11 x64 | `DeskSync-<版本>-Windows-x64.zip`（解压后双击 `desksync.exe`） | — | 同上 |
+| Linux x64 | `DeskSync-<版本>-Linux-x64.tar.gz` | — | 同上 |
+| Linux ARM64 | `DeskSync-<版本>-Linux-arm64.tar.gz` | — | 同上 |
 
-下载后可核对 `SHA256SUMS.txt`。
+每个正式包都带 `.sha256`，Release 里还有汇总的 `SHA256SUMS.txt`。
 
-Linux 上键鼠捕获依赖 X11（Xorg）会话：
-
-```bash
-sudo apt install libx11-6 libxtst6      # Debian / Ubuntu
-sudo dnf install libX11 libXtst         # Fedora
-```
-
-macOS 首次运行如果提示无法打开，是 Gatekeeper 拦的（没有商业签名）。解除隔离属性即可：
+**macOS**：首次打开会被 Gatekeeper 拦（没有 Apple 公证）。到「系统设置 → 隐私与安全性」点「仍要打开」，或者先解除隔离属性：
 
 ```bash
-xattr -dr com.apple.quarantine desksync
+xattr -dr com.apple.quarantine /Applications/DeskSync.app
 ```
+
+**Linux**：除了 X11 还需要 GTK 和状态栏指示器支持：
+
+```bash
+sudo apt install libx11-6 libxtst6 libgtk-3-0 libayatana-appindicator3-1
+```
+
+Linux 上键鼠捕获依赖 X11（Xorg）会话；Wayland 会话下注入不可用，请登录时切换到 Xorg。
+
+## 界面
+
+安装完是一个普通桌面应用：**菜单栏（Windows 托盘）常驻一个图标，右下角 Browse 里能看到它**。装完不会有 Dock 图标，这是刻意的——它在菜单栏，不在 Dock。
+
+点托盘图标里的「打开 DeskSync」弹出设置窗口，能看到：
+
+- **当前状态**：后台服务是否运行、正在控制谁 / 被谁控制、已连接哪些邻居
+- **暂停共享**：临时把共享停掉，本机输入不外发，也不接受接管
+- **收回控制**：立刻把光标从对方机器上抢回来
+- **本机设置**：名称、端口、是否自动信任首次连接的机器
+- **屏幕布局**：每个邻居一行，选它在本机的哪个方向（左/右/上/下），可增删
+- **证书指纹**：可一键复制，用来核对对端是不是你想连的那台
+
+改完点保存，**方向、邻居这类改动当场生效，不用重启服务**；改名字或换端口需要重启（界面上有「停止服务 / 启动服务」按钮）。
+
+界面和后台是两个独立进程，中间靠配置文件和状态文件通信。界面崩了或者干脆关掉，共享照样在跑。命令行 `desksync run` 可以完全脱离界面使用。
+
+> 注：Linux 的桌面环境不支持状态栏图标时（部分精简 WM），托盘图标可能不显示，用 `desksync run` 直接跑即可。
 
 ## 快速开始
 
@@ -99,9 +120,11 @@ xattr -dr com.apple.quarantine desksync
 
 | 命令 | 作用 |
 | --- | --- |
+| `desksync`（不带参数） | 拉起后台服务并打开界面（就是双击 app 时做的事） |
+| `desksync ui` | 只打开界面，后台服务没起的话会顺手拉起来 |
 | `desksync init <名字>` | 生成配置文件和本机证书 |
 | `desksync status` | 显示名字、端口、证书指纹、已信任的邻居 |
-| `desksync run` | 常驻运行 |
+| `desksync run` | 只跑后台服务，不显示界面（服务器、SSH 环境用这个） |
 | `desksync run --no-input` | 只跑网络，不捕获也不注入键鼠（本地联调用） |
 
 ## 配置项
@@ -149,18 +172,20 @@ xattr -dr com.apple.quarantine desksync
 ## 从源码构建
 
 ```bash
-cargo build --release
+cargo build --release --features ui
 ```
 
-产物在 `target/release/desksync`。release 配置开了 `opt-level="z"`、fat LTO、单编译单元和符号剥离，这是体积能做到 1 MB 出头的主要原因。
+产物在 `target/release/desksync`。带上界面体积会涨到几 MB；如果只要纯命令行内核，去掉 `--features ui`，体积回到 1 MB 出头——这是 `feature` 刻意分开的原因。
 
-Linux 构建需要 `libx11-dev` 和 `libxtst-dev`。
+release 配置开了 `opt-level="z"`、fat LTO、单编译单元和符号剥离，这是体积能做到这么小的主要原因。
+
+Linux 构建需要 `libx11-dev`、`libxtst-dev`、`libgtk-3-dev`、`libayatana-appindicator3-dev` 等（界面用）；macOS 可以直接 `./scripts/package-macos.sh` 打出 `.app` / `.dmg` / `.pkg`。
 
 ## 当前限制
 
 0.1 是可用核心，以下还没做：
 
-- 只有命令行，没有图形界面和托盘图标，配置靠手改 JSON
+- 界面刚起步：够用，但还比较朴素，后续会按使用手感迭代
 - 只同步剪贴板文本，不传图片，也不传文件
 - 邻居之间不支持链式跳转（A → B → C 需要 A、C 也直接相连）
 - 没有开机自启动（各平台用自己的方式加：launchd / 任务计划 / systemd）
