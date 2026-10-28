@@ -55,6 +55,7 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 echo "已安装到 $BIN_DIR/desksync"
 echo "命令行直接敲 desksync 即可启动（菜单栏会出现图标）。"
+echo "运行依赖：libx11 libxtst libxdo3 gtk3 libayatana-appindicator3（缺 libxdo 会直接起不来）。"
 EOS
 chmod +x "$STAGE/$NAME/install.sh"
 

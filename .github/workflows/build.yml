@@ -57,12 +57,16 @@ jobs:
           key: windows-x64
 
       - name: Build
-        run: cargo build --release --locked $BIN_FEATURES
+        run: cargo build --release --locked $BIN_FEATURES --target x86_64-pc-windows-msvc
 
-      - name: Verify the binary starts
+      # 安装器脚本里写死了 target/<triple>/release 路径，先确认文件在，免得 ISCC 报个莫名的错
+      - name: Verify the binary exists
         shell: pwsh
         run: |
-          & .\target\release\desksync.exe status
+          $exe = "target/x86_64-pc-windows-msvc/release/desksync.exe"
+          if (-not (Test-Path $exe)) { throw "构建产物不在 $exe" }
+          & ".\$exe" status
+          Get-Item $exe | Select-Object FullName, Length
 
       - name: Version
         id: ver
@@ -80,7 +84,7 @@ jobs:
         run: |
           $name = "DeskSync-${{ steps.ver.outputs.value }}-Windows-x64-portable"
           New-Item -ItemType Directory -Path "dist/$name" | Out-Null
-          Copy-Item target/release/desksync.exe "dist/$name/"
+          Copy-Item target/x86_64-pc-windows-msvc/release/desksync.exe "dist/$name/"
           Copy-Item README.md, LICENSE "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
           Remove-Item -Recurse "dist/$name"
@@ -133,8 +137,8 @@ jobs:
       - name: Linux system dependencies
         run: |
           sudo apt-get update
-          # X11：键鼠捕获；GTK/AppIndicator：托盘图标；xcb/xkbcommon：窗口
-          sudo apt-get install -y libx11-dev libxtst-dev libgtk-3-dev \
+          # X11/Xtst：键鼠捕获；xdo：Linux 端注入；GTK/AppIndicator：托盘图标；xcb/xkbcommon：窗口
+          sudo apt-get install -y libx11-dev libxtst-dev libxdo-dev libgtk-3-dev \
             libayatana-appindicator3-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-xfixes0-dev libxkbcommon-dev
 

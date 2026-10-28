@@ -45,11 +45,14 @@ sudo ./install.sh --system   # 或装到 /usr/local
 xattr -dr com.apple.quarantine /Applications/DeskSync.app
 ```
 
-**Linux**：除了 X11 还需要 GTK 和状态栏指示器支持：
+**Linux**：除了 X11，还需要这几个运行时库（缺了会启动失败或没有托盘图标）：
 
 ```bash
-sudo apt install libx11-6 libxtst6 libgtk-3-0 libayatana-appindicator3-1
+sudo apt install libx11-6 libxtst6 libxdo3 libgtk-3-0 libayatana-appindicator3-1
+# Fedora：sudo dnf install libX11 libXtst libxdo gtk3 libayatana-appindicator-gtk3
 ```
+
+其中 `libxdo3` 负责注入键鼠事件，缺了会直接报错 `error while loading shared libraries: libxdo.so.3`。
 
 Linux 上键鼠捕获依赖 X11（Xorg）会话；Wayland 会话下注入不可用，请登录时切换到 Xorg。
 
@@ -190,7 +193,7 @@ cargo build --release --features ui
 
 release 配置开了 `opt-level="z"`、fat LTO、单编译单元和符号剥离，这是体积能做到这么小的主要原因。
 
-Linux 构建需要 `libx11-dev`、`libxtst-dev`、`libgtk-3-dev`、`libayatana-appindicator3-dev` 等（界面用）；macOS 可以直接 `./scripts/package-macos.sh` 打出 `.app` / `.dmg` / `.pkg`。
+Linux 构建需要这些系统库：`libx11-dev`、`libxtst-dev`、`libxdo-dev`（键鼠注入）、`libgtk-3-dev`、`libayatana-appindicator3-dev`、`libxcb-*-dev`、`libxkbcommon-dev`（界面用）。macOS 可以直接 `./scripts/package-macos.sh` 打出 `.app` / `.dmg` / `.pkg`。
 
 ## 当前限制
 
