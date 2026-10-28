@@ -32,9 +32,56 @@ pub fn run() -> io::Result<()> {
                 .with_icon(load_icon()),
             ..Default::default()
         },
-        Box::new(move |_cc| Ok(Box::new(UiApp::new(cfg)))),
+        Box::new(move |cc| {
+            install_cjk_fonts(&cc.egui_ctx);
+            Ok(Box::new(UiApp::new(cfg)))
+        }),
     )
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+}
+
+/// egui 内置字体不含 CJK 字形，中文会渲染成方块。
+/// 把系统里现成的中文字体追加为回退字体（排在默认字体后面，只接管汉字）。
+fn install_cjk_fonts(ctx: &egui::Context) {
+    let candidates: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+        ]
+    } else if cfg!(target_os = "windows") {
+        &[
+            "C:\\Windows\\Fonts\\msyh.ttc",
+            "C:\\Windows\\Fonts\\msyh.ttf",
+            "C:\\Windows\\Fonts\\simsun.ttc",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+        ]
+    } else {
+        &[
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/wenquanyi-microhei/wqy-microhei.ttc",
+        ]
+    };
+
+    for path in candidates {
+        let Ok(data) = std::fs::read(path) else {
+            continue;
+        };
+        let mut fonts = egui::FontDefinitions::default();
+        fonts
+            .font_data
+            .insert("system-cjk".to_owned(), egui::FontData::from_owned(data).into());
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push("system-cjk".to_owned());
+        }
+        ctx.set_fonts(fonts);
+        return;
+    }
+    eprintln!("未找到系统中文字体，界面上的中文可能显示为方块");
 }
 
 fn load_icon() -> egui::viewport::IconData {
