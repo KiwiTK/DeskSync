@@ -1,0 +1,32 @@
+[package]
+name = "desksync"
+version = "0.1.0"
+edition = "2021"
+description = "Share one keyboard, mouse and clipboard across Windows, macOS and Linux over LAN"
+license = "MIT"
+repository = "https://github.com/KiwiTK/DeskSync"
+homepage = "https://github.com/KiwiTK/DeskSync"
+readme = "README.md"
+keywords = ["kvm", "mouse", "keyboard", "clipboard", "lan"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "desksync"
+path = "src/main.rs"
+
+[dependencies]
+arboard = "3"
+rcgen = { version = "0.13", features = ["crypto", "ring"] }
+rdev = { version = "0.5", features = ["serialize"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.1"
+
+# 体积优先：最小体积优化 + 全量 LTO + 单编译单元 + 去掉符号表。
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
