@@ -4,7 +4,7 @@
 //! 写 `config.json` 和 `command.json`，后台服务负责其余部分。
 //! 这样界面崩了、被关掉了，共享本身都不受影响。
 
-use crate::config::{Config, Edge, Peer};
+use crate::config::{Config, Edge, Peer, Rect};
 use crate::status;
 use eframe::egui;
 use std::collections::HashMap;
@@ -173,7 +173,6 @@ fn build_tray() -> io::Result<Tray> {
 struct Draft {
     name: String,
     addr: String,
-    edge: usize,
 }
 
 struct UiApp {
@@ -187,53 +186,8 @@ struct UiApp {
     tray_error: Option<String>,
     /// 用户明确要求退出（托盘「退出」或 Cmd+Q），此时不再拦截关窗。
     quitting: bool,
-    /// 布局画布里每台邻居相对本机中心的偏移（像素）。
-    positions: HashMap<String, egui::Vec2>,
-}
-
-/// 每条边对应的画布默认摆放偏移。
-fn default_offset(e: Edge) -> egui::Vec2 {
-    match e {
-        Edge::Left => egui::vec2(-150.0, 0.0),
-        Edge::Right => egui::vec2(150.0, 0.0),
-        Edge::Top => egui::vec2(0.0, -110.0),
-        Edge::Bottom => egui::vec2(0.0, 110.0),
-    }
-}
-
-/// 根据邻居相对本机的位置算出它该挂在哪条边上。
-fn edge_from_offset(d: egui::Vec2) -> Edge {
-    if d.x.abs() >= d.y.abs() {
-        if d.x >= 0.0 {
-            Edge::Right
-        } else {
-            Edge::Left
-        }
-    } else if d.y >= 0.0 {
-        Edge::Bottom
-    } else {
-        Edge::Top
-    }
-}
-
-const EDGE_LABELS: [&str; 4] = ["左", "右", "上", "下"];
-
-fn edge_of(i: usize) -> Edge {
-    match i {
-        0 => Edge::Left,
-        1 => Edge::Right,
-        2 => Edge::Top,
-        _ => Edge::Bottom,
-    }
-}
-
-fn index_of(e: Edge) -> usize {
-    match e {
-        Edge::Left => 0,
-        Edge::Right => 1,
-        Edge::Top => 2,
-        Edge::Bottom => 3,
-    }
+    /// 布局画布的草稿（虚拟画布矩形，含本机）。保存时写进配置。
+    layout_draft: HashMap<String, Rect>,
 }
 
 impl UiApp {
@@ -247,7 +201,7 @@ impl UiApp {
             tray: None,
             tray_error: None,
             quitting: false,
-            positions: HashMap::new(),
+            layout_draft: HashMap::new(),
         }
     }
 
@@ -266,9 +220,20 @@ impl UiApp {
     }
 
     fn save(&mut self) -> io::Result<()> {
+        self.cfg.layout = self.layout_draft.clone();
+        self.cfg.ensure_layout(self.screen_size());
+        self.layout_draft = self.cfg.layout.clone();
         self.cfg.save()?;
-        self.notice = "已保存，屏幕方向立即生效；改名或换端口需要重启后台服务。".to_string();
+        self.notice = "已保存，布局立即生效；改名或换端口需要重启后台服务。".to_string();
         Ok(())
+    }
+
+    /// 本机屏幕尺寸：状态文件里有就用，否则按常见值兜底。
+    fn screen_size(&self) -> (u32, u32) {
+        self.status
+            .as_ref()
+            .map(|s| s.screen)
+            .unwrap_or((1920, 1080))
     }
 
     fn poke(&self, cmd: status::UiCommand) {
@@ -490,59 +455,96 @@ impl UiApp {
         });
     }
 
-    /// 布局画布：本机居中，邻居是可拖动的"显示器"。
-    /// 拖到哪边，出口方向就自动设成哪边，保存后立即生效。
+    /// 布局画布：所有屏幕按真实分辨率等比摆在虚拟画布上，可自由拖动。
+    /// 两台屏幕挨着（有公共边）就能跨屏，光标从公共边的哪个位置出去
+    /// 就从对方的对应位置进来——同侧可以摆多台，也可以错位摆放。
     fn draw_layout(&mut self, ui: &mut egui::Ui) {
-        // 位置表和邻居列表保持同步：新邻居按当前边给个默认位置，删掉的清掉。
+        let screen = self.screen_size();
+        self.cfg.ensure_layout(screen);
+        // 草稿和邻居列表保持同步：新邻居给个默认位置（右边），删掉的清掉。
         for p in &self.cfg.peers {
-            let entry = self.positions.entry(p.name.clone());
-            let edge = self.cfg.edges.get(&p.name).copied().unwrap_or(Edge::Right);
-            entry.or_insert_with(|| default_offset(edge));
+            self.layout_draft
+                .entry(p.name.clone())
+                .or_insert_with(|| Rect::new(screen.0 as i64, 0, screen.0, screen.1));
         }
-        self.positions
-            .retain(|name, _| self.cfg.peers.iter().any(|p| &p.name == name));
+        self.layout_draft.retain(|name, _| {
+            name == &self.cfg.name || self.cfg.peers.iter().any(|p| &p.name == name)
+        });
 
         let canvas_w = ui.available_width();
-        let canvas_h = 190.0;
-        let (rect, _) = ui.allocate_exact_size(
+        let canvas_h = 230.0;
+        let (area, _) = ui.allocate_exact_size(
             egui::vec2(canvas_w, canvas_h),
             egui::Sense::hover(),
         );
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 8.0, ui.visuals().faint_bg_color);
-        painter.rect_stroke(rect, 8.0, ui.visuals().widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
-
-        let center = rect.center();
-        let monitor = egui::vec2(92.0, 58.0);
-
-        // 本机
-        let self_rect = egui::Rect::from_center_size(center, monitor);
-        let self_fill = ui.visuals().widgets.active.bg_fill;
-        painter.rect_filled(self_rect, 6.0, self_fill);
-        painter.rect_stroke(self_rect, 6.0, ui.visuals().widgets.active.bg_stroke, egui::StrokeKind::Inside);
-        painter.text(
-            self_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            format!("{}\n本机", self.cfg.name),
-            egui::TextStyle::Body.resolve(ui.style()),
-            ui.visuals().strong_text_color(),
+        let painter = ui.painter_at(area);
+        painter.rect_filled(area, 8.0, ui.visuals().faint_bg_color);
+        painter.rect_stroke(
+            area,
+            8.0,
+            ui.visuals().widgets.noninteractive.bg_stroke,
+            egui::StrokeKind::Inside,
         );
 
-        let mut changed_edge: Option<(String, Edge)> = None;
+        // 包围盒 -> 画布的等比变换
+        let mut minx = i64::MAX;
+        let mut miny = i64::MAX;
+        let mut maxx = i64::MIN;
+        let mut maxy = i64::MIN;
+        for r in self.layout_draft.values() {
+            minx = minx.min(r.left());
+            miny = miny.min(r.top());
+            maxx = maxx.max(r.right());
+            maxy = maxy.max(r.bottom());
+        }
+        if minx > maxx {
+            return;
+        }
+        let pad = 14.0_f32;
+        let bw = (maxx - minx).max(1) as f32;
+        let bh = (maxy - miny).max(1) as f32;
+        let s = ((canvas_w - pad * 2.0) / bw)
+            .min((canvas_h - pad * 2.0) / bh)
+            .min(0.2); // 两台机器时别放得太大
+        let to_canvas = |vx: i64, vy: i64| -> egui::Pos2 {
+            egui::pos2(
+                area.left() + pad + (vx - minx) as f32 * s,
+                area.top() + pad + (vy - miny) as f32 * s,
+            )
+        };
+        let to_screen_rect = |r: &Rect| -> egui::Rect {
+            egui::Rect::from_min_max(to_canvas(r.left(), r.top()), to_canvas(r.right(), r.bottom()))
+        };
 
+        let me = *self
+            .layout_draft
+            .entry(self.cfg.name.clone())
+            .or_insert_with(|| Rect::new(0, 0, screen.0, screen.1));
+
+        // 公共边高亮：挨着的屏幕之间画一段亮线
+        let mut shared: Vec<(egui::Pos2, egui::Pos2)> = Vec::new();
+        for (name, r) in &self.layout_draft {
+            if name == &self.cfg.name {
+                continue;
+            }
+            if let Some((edge, seg)) = Rect::shared_border(&me, r, 4) {
+                let (a, b) = match edge {
+                    Edge::Left => ((r.right(), seg.0), (r.right(), seg.1)),
+                    Edge::Right => ((r.left(), seg.0), (r.left(), seg.1)),
+                    Edge::Top => ((seg.0, r.bottom()), (seg.1, r.bottom())),
+                    Edge::Bottom => ((seg.0, r.top()), (seg.1, r.top())),
+                };
+                shared.push((to_canvas(a.0, a.1), to_canvas(b.0, b.1)));
+            }
+        }
+
+        // 先画邻居，再画本机（本机在最上层）
+        let mut drag_snap_notice: Option<String> = None;
         for p in self.cfg.peers.clone() {
-            let Some(pos) = self.positions.get(&p.name).copied() else {
+            let Some(r) = self.layout_draft.get(&p.name).copied() else {
                 continue;
             };
-            // 位置限制在画布内
-            let max_dx = canvas_w / 2.0 - monitor.x / 2.0 - 4.0;
-            let max_dy = canvas_h / 2.0 - monitor.y / 2.0 - 4.0;
-            let pos = egui::vec2(
-                pos.x.clamp(-max_dx, max_dx),
-                pos.y.clamp(-max_dy, max_dy),
-            );
-
-            let peer_rect = egui::Rect::from_center_size(center + pos, monitor);
+            let rect = to_screen_rect(&r);
             let connected = self
                 .status
                 .as_ref()
@@ -553,67 +555,81 @@ impl UiApp {
             } else {
                 ui.visuals().widgets.inactive.bg_fill
             };
-
-            // 连线：本机边中点 -> 邻居边中点
-            let edge_now = self.cfg.edges.get(&p.name).copied().unwrap_or(Edge::Right);
-            let (a, b) = match edge_now {
-                Edge::Right => (
-                    self_rect.right_center(),
-                    peer_rect.left_center(),
-                ),
-                Edge::Left => (
-                    self_rect.left_center(),
-                    peer_rect.right_center(),
-                ),
-                Edge::Top => (
-                    egui::pos2(self_rect.center().x, self_rect.top()),
-                    egui::pos2(peer_rect.center().x, peer_rect.bottom()),
-                ),
-                Edge::Bottom => (
-                    egui::pos2(self_rect.center().x, self_rect.bottom()),
-                    egui::pos2(peer_rect.center().x, peer_rect.top()),
-                ),
-            };
-            painter.line_segment([a, b], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 220)));
-
-            painter.rect_filled(peer_rect, 6.0, fill);
-            painter.rect_stroke(peer_rect, 6.0, ui.visuals().widgets.inactive.bg_stroke, egui::StrokeKind::Inside);
+            painter.rect_filled(rect, 5.0, fill);
+            painter.rect_stroke(
+                rect,
+                5.0,
+                ui.visuals().widgets.inactive.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
             let dot = if connected { "● " } else { "○ " };
             painter.text(
-                peer_rect.center(),
+                rect.center(),
                 egui::Align2::CENTER_CENTER,
-                format!("{dot}{}\n{}", p.name, EDGE_LABELS[index_of(edge_now)]),
+                format!("{dot}{}\n{}×{}", p.name, r.w, r.h),
                 egui::TextStyle::Body.resolve(ui.style()),
                 ui.visuals().strong_text_color(),
             );
 
-            // 拖动
+            // 拖动：虚拟坐标随画布缩放移动，靠近别的屏幕边时自动吸附
             let id = egui::Id::new(("layout_peer", p.name.clone()));
-            let resp = ui.interact(peer_rect, id, egui::Sense::drag());
+            let resp = ui.interact(rect, id, egui::Sense::drag());
             if resp.dragged() {
-                let new_pos = pos + resp.drag_delta();
-                self.positions.insert(p.name.clone(), new_pos);
-                let edge = edge_from_offset(new_pos);
-                if self.cfg.edges.get(&p.name).copied() != Some(edge) {
-                    self.cfg.edges.insert(p.name.clone(), edge);
-                    changed_edge = Some((p.name.clone(), edge));
+                let d = resp.drag_delta();
+                let mut nr = r;
+                nr.x = (r.x + (d.x / s) as i64).clamp(-4 * screen.0 as i64, 4 * screen.0 as i64);
+                nr.y = (r.y + (d.y / s) as i64).clamp(-4 * screen.1 as i64, 4 * screen.1 as i64);
+                if let Some(snapped) = snap_rect(&nr, &self.layout_draft, &p.name, 32) {
+                    if snapped != nr {
+                        drag_snap_notice = Some(p.name.clone());
+                    }
+                    nr = snapped;
                 }
+                self.layout_draft.insert(p.name.clone(), nr);
             }
             if resp.hovered() {
                 painter.text(
-                    peer_rect.left_top() + egui::vec2(0.0, -14.0),
+                    rect.left_top() + egui::vec2(0.0, -13.0),
                     egui::Align2::LEFT_BOTTOM,
-                    "拖动改变位置",
+                    "拖动摆放",
                     egui::TextStyle::Small.resolve(ui.style()),
                     ui.visuals().weak_text_color(),
                 );
             }
         }
 
-        if let Some((name, edge)) = changed_edge {
-            self.notice = format!("{name} 已放到{}侧，保存后生效。", EDGE_LABELS[index_of(edge)]);
+        // 本机
+        let me_rect = to_screen_rect(&me);
+        painter.rect_filled(me_rect, 5.0, ui.visuals().widgets.active.bg_fill);
+        painter.rect_stroke(
+            me_rect,
+            5.0,
+            ui.visuals().widgets.active.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            me_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{}\n本机 {}×{}", self.cfg.name, me.w, me.h),
+            egui::TextStyle::Body.resolve(ui.style()),
+            ui.visuals().strong_text_color(),
+        );
+
+        // 公共边最后画，压在色块上
+        for (a, b) in shared {
+            painter.line_segment(
+                [a, b],
+                egui::Stroke::new(3.0_f32, egui::Color32::from_rgb(250, 200, 80)),
+            );
         }
-        ui.small("把邻居的屏幕拖到对应的一侧，出口方向自动跟着变；绿框表示已连接。");
+
+        if let Some(name) = drag_snap_notice {
+            self.notice = format!("{name} 已吸附到相邻位置，保存后生效。");
+        }
+        ui.small(
+            "把邻居拖到任意位置：挨着本机的边（黄线）就能跨屏，同一侧可以放多台、可以错位。\
+             屏幕尺寸会按对方真实分辨率自动校正。",
+        );
     }
 
     fn draw_peers(&mut self, ui: &mut egui::Ui) {
@@ -631,13 +647,6 @@ impl UiApp {
                 .find(|p| &p.name == name)
                 .and_then(|p| p.addr.clone())
                 .unwrap_or_else(|| "自动发现".to_string());
-            let edge_idx = self
-                .cfg
-                .edges
-                .get(name)
-                .copied()
-                .map(index_of)
-                .unwrap_or(1);
             let connected = self
                 .status
                 .as_ref()
@@ -652,26 +661,14 @@ impl UiApp {
                     if ui.small_button("删除").clicked() {
                         remove = Some(name.clone());
                     }
-                    let mut idx = edge_idx;
-                    egui::ComboBox::from_id_salt(format!("edge_{name}"))
-                        .width(70.0)
-                        .selected_text(EDGE_LABELS[idx])
-                        .show_ui(ui, |ui| {
-                            for (i, label) in EDGE_LABELS.iter().enumerate() {
-                                ui.selectable_value(&mut idx, i, *label);
-                            }
-                        });
-                    ui.label("通向它的边");
-                    if idx != edge_idx {
-                        self.cfg.edges.insert(name.clone(), edge_of(idx));
-                    }
+                    // 位置在「屏幕布局」画布里拖动设置
                 });
             });
         }
 
         if let Some(name) = remove {
             self.cfg.peers.retain(|p| p.name != name);
-            self.cfg.edges.remove(&name);
+            self.layout_draft.remove(&name);
             self.notice = format!("已移除 {name}，记得保存。");
         }
 
@@ -682,16 +679,6 @@ impl UiApp {
             ui.text_edit_singleline(&mut self.draft.name);
             ui.label("地址");
             ui.text_edit_singleline(&mut self.draft.addr);
-        });
-        ui.horizontal(|ui| {
-            ui.label("出口方向");
-            egui::ComboBox::from_id_salt("draft_edge")
-                .selected_text(EDGE_LABELS[self.draft.edge])
-                .show_ui(ui, |ui| {
-                    for (i, label) in EDGE_LABELS.iter().enumerate() {
-                        ui.selectable_value(&mut self.draft.edge, i, *label);
-                    }
-                });
             if ui.button("添加").clicked() && !self.draft.name.trim().is_empty() {
                 let name = self.draft.name.trim().to_string();
                 let addr = self.draft.addr.trim().to_string();
@@ -702,13 +689,12 @@ impl UiApp {
                         name: name.clone(),
                         addr: if addr.is_empty() { None } else { Some(addr) },
                     });
-                    self.cfg.edges.insert(name, edge_of(self.draft.edge));
                     self.draft = Draft::default();
-                    self.notice = "已加入列表，记得保存。".to_string();
+                    self.notice = "已加入列表，在「屏幕布局」里把它拖到合适的位置后保存。".to_string();
                 }
             }
         });
-        ui.small("地址形如 192.168.1.20:24872；留空则靠局域网广播发现。");
+        ui.small("地址形如 192.168.1.20:24987；留空则靠局域网广播发现。");
     }
 
     fn draw_trust(&mut self, ui: &mut egui::Ui) {
@@ -743,6 +729,47 @@ fn short(fp: &str) -> String {
         format!("{}…{}", &fp[..12], &fp[fp.len() - 12..])
     } else {
         fp.to_string()
+    }
+}
+
+/// 把矩形 `r` 吸附到其他屏幕的边上：某个边在 `tol`（虚拟像素）内就贴齐。
+/// 返回吸附后的矩形；不需要吸附时原样返回。
+fn snap_rect(
+    r: &Rect,
+    others: &HashMap<String, Rect>,
+    self_name: &str,
+    tol: i64,
+) -> Option<Rect> {
+    let mut nr = *r;
+    for (name, o) in others {
+        if name == self_name || o == r {
+            continue;
+        }
+        // 水平：贴对方的左边/右边
+        if (nr.right() - o.left()).abs() <= tol {
+            nr.x = o.left() - nr.w as i64;
+        } else if (nr.left() - o.right()).abs() <= tol {
+            nr.x = o.right();
+        } else if (nr.left() - o.left()).abs() <= tol {
+            nr.x = o.x;
+        } else if (nr.right() - o.right()).abs() <= tol {
+            nr.x = o.right() - nr.w as i64;
+        }
+        // 垂直：贴对方的顶边/底边
+        if (nr.bottom() - o.top()).abs() <= tol {
+            nr.y = o.top() - nr.h as i64;
+        } else if (nr.top() - o.bottom()).abs() <= tol {
+            nr.y = o.bottom();
+        } else if (nr.top() - o.top()).abs() <= tol {
+            nr.y = o.y;
+        } else if (nr.bottom() - o.bottom()).abs() <= tol {
+            nr.y = o.bottom() - nr.h as i64;
+        }
+    }
+    if nr == *r {
+        None
+    } else {
+        Some(nr)
     }
 }
 

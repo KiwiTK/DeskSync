@@ -7,3 +7,9 @@
 /DeskSync.app
 .dmgroot
 .pkgroot
+
+# 本地打包产物与备份
+DeskSync*.app/
+dist/
+dist-*/
+target/universal/

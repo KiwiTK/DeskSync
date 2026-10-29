@@ -35,8 +35,8 @@ enum Msg {
     Input(rdev::EventType),
     /// 邻居发来的报文。
     Frame(String, Frame),
-    /// 新连接建立。
-    Attach(String, Sender<Frame>),
+    /// 新连接建立。附带对方 Hello 里自报的屏幕尺寸。
+    Attach(String, Sender<Frame>, Option<(u32, u32)>),
     /// 连接断开。
     Detach(String),
 }
@@ -104,9 +104,8 @@ fn cmd_init(args: &[String]) -> std::io::Result<()> {
     cfg.name = name;
     cfg.save()?;
     println!("已写入 {}", Config::path().display());
-    println!("用编辑器填好这两项后启动：");
-    println!("  edges: {{\"对方名字\": \"right\"}}   // 本机哪条边通向对方");
-    println!("  peers: [{{\"name\": \"对方名字\", \"addr\": \"192.168.1.20:24872\"}}]");
+    println!("打开图形界面（直接运行 desksync）拖动屏幕布局，或在配置文件里填：");
+    println!("  peers: [{{\"name\": \"对方名字\", \"addr\": \"192.168.1.20:24987\"}}]");
     Ok(())
 }
 
@@ -120,7 +119,9 @@ fn cmd_status() -> std::io::Result<()> {
     println!("名称: {}", cfg.name);
     println!("端口: {}", cfg.port);
     println!("证书指纹: {}", id.fingerprint);
-    println!("屏幕边缘: {:?}", cfg.edges);
+    for (name, r) in &cfg.layout {
+        println!("布局: {name} = ({},{}) {}x{}", r.x, r.y, r.w, r.h);
+    }
     println!("已信任: {:?}", cfg.trusted.keys().collect::<Vec<_>>());
     println!("配置: {}", Config::path().display());
     Ok(())
@@ -150,7 +151,10 @@ fn run(no_input: bool) -> std::io::Result<()> {
     }));
     let connected: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
-    let mut session = Session::new(w, h, cfg.edges.clone());
+    let mut cfg = cfg;
+    let screen = (w.round() as u32, h.round() as u32);
+    cfg.ensure_layout(screen);
+    let mut session = Session::new(w, h, cfg.name.clone(), cfg.layout.clone());
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
 
     println!("DeskSync 已启动");
@@ -190,6 +194,7 @@ fn run(no_input: bool) -> std::io::Result<()> {
     let server_cfg = transport::server_config(&id, trust.clone())?;
     crate::log::write(&format!("后台: 端口 {} 监听就绪", cfg.port));
     let our_name = cfg.name.clone();
+    let our_screen = screen;
     let accept_tx = msg_tx.clone();
     thread::spawn(move || {
         for stream in listener.incoming() {
@@ -199,10 +204,16 @@ fn run(no_input: bool) -> std::io::Result<()> {
             let _ = stream.set_read_timeout(Some(Duration::from_millis(10)));
             let cfg2 = server_cfg.clone();
             let name = our_name.clone();
+            let screen2 = our_screen;
             let tx = accept_tx.clone();
             thread::spawn(move || {
                 if let Ok(conn) = rustls::ServerConnection::new(cfg2) {
-                    serve(rustls::StreamOwned::new(conn, stream), &name, &tx);
+                    serve(
+                        rustls::StreamOwned::new(conn, stream),
+                        &name,
+                        screen2,
+                        &tx,
+                    );
                 }
             });
         }
@@ -218,6 +229,7 @@ fn run(no_input: bool) -> std::io::Result<()> {
     let dial_cfg = transport::client_config(&id, trust.clone())?;
     let dial_tx = msg_tx.clone();
     let dial_connected = connected.clone();
+    let dial_screen = screen;
     thread::spawn(move || {
         let mut seen: HashMap<String, (IpAddr, u16)> = HashMap::new();
         for (name, addr) in &dial_peers {
@@ -249,8 +261,14 @@ fn run(no_input: bool) -> std::io::Result<()> {
                 };
                 let tx = dial_tx.clone();
                 let n = dial_name.clone();
+                let screen2 = dial_screen;
                 thread::spawn(move || {
-                    serve(rustls::StreamOwned::new(conn, stream), &n, &tx);
+                    serve(
+                        rustls::StreamOwned::new(conn, stream),
+                        &n,
+                        screen2,
+                        &tx,
+                    );
                 });
             }
             thread::sleep(Duration::from_secs(3));
@@ -261,7 +279,6 @@ fn run(no_input: bool) -> std::io::Result<()> {
     let mut last_clip = Instant::now();
     let mut last_tick = Instant::now();
     let mut cfg_stamp = config_stamp();
-    let screen = (w.round() as u32, h.round() as u32);
 
     loop {
         match msg_rx.recv_timeout(Duration::from_millis(200)) {
@@ -274,13 +291,16 @@ fn run(no_input: bool) -> std::io::Result<()> {
                         session.handle_frame(&peer, frame);
                     }
                 }
-                Msg::Attach(name, tx) => {
+                Msg::Attach(name, tx, peer_screen) => {
                     if session.peers.contains_key(&name) {
                         // 已有同名连接，丢掉新通道让那个线程退出
                         drop(tx);
                     } else {
                         println!("已连接: {name}");
                         connected.lock().unwrap().insert(name.clone());
+                        if let Some(s) = peer_screen {
+                            session.update_peer_screen(&name, s);
+                        }
                         session.connect(name, tx);
                     }
                 }
@@ -315,8 +335,9 @@ fn run(no_input: bool) -> std::io::Result<()> {
             if stamp != cfg_stamp {
                 cfg_stamp = stamp;
                 match Config::load() {
-                    Ok(new_cfg) => {
-                        session.set_edges(new_cfg.edges.clone());
+                    Ok(mut new_cfg) => {
+                        new_cfg.ensure_layout(screen);
+                        session.set_layout(new_cfg.layout.clone());
                         println!("配置已重载，无需重启");
                     }
                     Err(e) => eprintln!("配置读取失败，沿用旧配置: {e}"),
@@ -365,19 +386,31 @@ fn parse_addr(text: &str) -> Option<(IpAddr, u16)> {
     let text = text.trim();
     let (host, port) = match text.rsplit_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().ok()?),
-        None => (text, 24872),
+        None => (text, 24987),
     };
     let host = host.trim_matches(|c| c == '[' || c == ']');
     Some((host.parse::<IpAddr>().ok()?, port))
 }
 
 /// 一条连接的读写循环：先交换 Hello，然后转发报文。
-fn serve<C: transport::Conn>(mut stream: C, name: &str, tx: &Sender<Msg>) {
+fn serve<C: transport::Conn>(
+    mut stream: C,
+    name: &str,
+    screen: (u32, u32),
+    tx: &Sender<Msg>,
+) {
     let mut hello_sent = false;
     let mut peer = None;
+    let mut peer_screen = None;
     for _ in 0..4000 {
         if !hello_sent {
-            match write_frame(&mut stream, &Frame::Hello { name: name.to_string() }) {
+            match write_frame(
+                &mut stream,
+                &Frame::Hello {
+                    name: name.to_string(),
+                    screen: Some(screen),
+                },
+            ) {
                 Ok(()) => hello_sent = true,
                 Err(e) if retryable(&e) => {
                     thread::sleep(Duration::from_millis(2));
@@ -387,8 +420,9 @@ fn serve<C: transport::Conn>(mut stream: C, name: &str, tx: &Sender<Msg>) {
             }
         }
         match read_frame(&mut stream) {
-            Ok(Some(Frame::Hello { name })) => {
+            Ok(Some(Frame::Hello { name, screen })) => {
                 peer = Some(name);
+                peer_screen = screen;
                 break;
             }
             Ok(Some(_)) => {}
@@ -399,7 +433,7 @@ fn serve<C: transport::Conn>(mut stream: C, name: &str, tx: &Sender<Msg>) {
     }
     let Some(peer) = peer else { return };
     let (out_tx, out_rx) = mpsc::channel::<Frame>();
-    if tx.send(Msg::Attach(peer.clone(), out_tx)).is_err() {
+    if tx.send(Msg::Attach(peer.clone(), out_tx, peer_screen)).is_err() {
         return;
     }
     loop {

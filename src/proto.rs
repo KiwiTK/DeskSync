@@ -1,4 +1,3 @@
-use crate::config::Edge;
 use serde::{Deserialize, Serialize};
 
 /// 网络上传输的输入事件。
@@ -16,16 +15,18 @@ pub enum InputEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Frame {
-    /// 握手后立刻发出的自我介绍。
-    Hello { name: String },
-    /// 我把控制交给你：光标从我的 `edge` 出去，`x_frac`/`y_frac` 是归一化位置。
-    Enter {
-        edge: Edge,
-        x_frac: f64,
-        y_frac: f64,
+    /// 握手后立刻发出的自我介绍。screen 是本机屏幕尺寸，用来把布局里的
+    /// 矩形尺寸自动校正成对方的真实分辨率。
+    Hello {
+        name: String,
+        #[serde(default)]
+        screen: Option<(u32, u32)>,
     },
-    /// 归还控制，附带归还方的归一化光标位置。
-    Leave { x_frac: f64, y_frac: f64 },
+    /// 我把控制交给你：`x`/`y` 是虚拟画布上的交出点（双方布局一致时
+    /// 这个点就落在两边共享的边上）。
+    Enter { x: f64, y: f64 },
+    /// 归还控制，附带归还点的虚拟画布坐标。
+    Leave { x: f64, y: f64 },
     /// 转发的键鼠事件。
     Input(InputEvent),
     /// 剪贴板文本同步。
