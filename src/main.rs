@@ -118,6 +118,8 @@ fn cmd_status() -> std::io::Result<()> {
     let id = Identity::load_or_create(&cfg.name)?;
     println!("名称: {}", cfg.name);
     println!("端口: {}", cfg.port);
+    // CI 会校验这一行：打包出来的 exe 必须带界面，否则双击只会静默跑后台。
+    println!("界面支持: {}", if cfg!(feature = "ui") { "是" } else { "否" });
     println!("证书指纹: {}", id.fingerprint);
     for (name, r) in &cfg.layout {
         println!("布局: {name} = ({},{}) {}x{}", r.x, r.y, r.w, r.h);

@@ -30,8 +30,18 @@ jobs:
         with:
           key: macos-universal
 
-      - run: cargo build --release --locked $BIN_FEATURES --target aarch64-apple-darwin
-      - run: cargo build --release --locked $BIN_FEATURES --target x86_64-apple-darwin
+      # ${{ env.BIN_FEATURES }} 是 Actions 表达式：bash 和 pwsh 里都能正确展开。
+      # 之前写成 $BIN_FEATURES，Windows job 的默认 shell 是 pwsh，PowerShell 里它是未定义变量
+      # → 静默变成空串 → 编出来的 exe 没有 ui 特性 → 双击只跑后台，永远不出窗口。
+      # 下面每个平台都加了「界面支持: 是」的闸门，防止复发。
+      - run: cargo build --release --locked ${{ env.BIN_FEATURES }} --target aarch64-apple-darwin
+      - run: cargo build --release --locked ${{ env.BIN_FEATURES }} --target x86_64-apple-darwin
+
+      - name: 确认构建包含界面
+        run: |
+          ./target/x86_64-apple-darwin/release/desksync status
+          ./target/x86_64-apple-darwin/release/desksync status | grep -q "界面支持: 是" \
+            || { echo "这个二进制没编译进界面"; exit 1; }
 
       - name: Build app bundle, dmg and pkg
         run: |
@@ -57,9 +67,8 @@ jobs:
           key: windows-x64
 
       - name: Build
-        run: cargo build --release --locked $BIN_FEATURES --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked ${{ env.BIN_FEATURES }} --target x86_64-pc-windows-msvc
 
-      # 安装器脚本里写死了 target/<triple>/release 路径，先确认文件在，免得 ISCC 报个莫名的错
       - name: Verify the binary exists
         shell: pwsh
         run: |
@@ -67,6 +76,37 @@ jobs:
           if (-not (Test-Path $exe)) { throw "构建产物不在 $exe" }
           & ".\$exe" status
           Get-Item $exe | Select-Object FullName, Length
+
+      # 闸门：pwsh 里变量语义和 bash 不一样，必须显式确认界面真的编进去了。
+      - name: 确认构建包含界面
+        shell: pwsh
+        run: |
+          $exe = "target/x86_64-pc-windows-msvc/release/desksync.exe"
+          $out = & ".\$exe" status | Out-String
+          Write-Host $out
+          if ($out -notmatch "界面支持: 是") {
+            throw "这个 exe 没有界面：双击只会静默跑后台。检查 BIN_FEATURES 有没有正确传给 cargo"
+          }
+
+      # 信息性冒烟：真跑一次界面，看它在这个无 GPU 的 runner 上能不能起来。
+      # 只报告不阻断——runner 是虚拟显卡，起不来不代表用户机器上起不来。
+      - name: 界面冒烟（信息性）
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "target/x86_64-pc-windows-msvc/release/desksync.exe").Path
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 20
+          $alive = -not $p.HasExited
+          Write-Host "界面进程是否存活: $alive (pid=$($p.Id))"
+          if (-not $alive) { Write-Host "退出码: $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          $log = "$env:LOCALAPPDATA\DeskSync\desksync.log"
+          if (Test-Path $log) {
+            Write-Host "=== desksync.log 尾部 ==="
+            Get-Content $log -Tail 30
+          } else {
+            Write-Host "没有日志文件：$log"
+          }
 
       - name: Version
         id: ver
@@ -143,7 +183,13 @@ jobs:
             libxcb-xfixes0-dev libxkbcommon-dev
 
       - name: Build
-        run: cargo build --release --locked $BIN_FEATURES --target ${{ matrix.target }}
+        run: cargo build --release --locked ${{ env.BIN_FEATURES }} --target ${{ matrix.target }}
+
+      - name: 确认构建包含界面
+        run: |
+          ./target/${{ matrix.target }}/release/desksync status
+          ./target/${{ matrix.target }}/release/desksync status | grep -q "界面支持: 是" \
+            || { echo "这个二进制没编译进界面"; exit 1; }
 
       - name: Package
         shell: bash

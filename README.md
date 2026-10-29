@@ -189,6 +189,14 @@ Linux 上键鼠捕获依赖 X11（Xorg）会话；Wayland 会话下注入不可�
 | macOS | `~/Library/Application Support/DeskSync/desksync.log` |
 | Linux | `~/.config/desksync/desksync.log` |
 
+- **双击完全没反应、也不出界面**：先确认这个程序到底带不带界面。PowerShell 里跑：
+
+  ```powershell
+  .\desksync.exe status
+  ```
+
+  输出里必须有 `界面支持: 是`。如果是「否」，说明这个 exe 编译时就没带界面特性（双击只会静默跑后台），请重新下载 v0.2.4 及以上版本的安装包。
+
 - 界面点不开、一闪而过：看日志最后的 `PANIC` 或 `启动失败`。Windows 上启动失败还会弹一个错误框，把里面的文字发出来即可。
 - **Windows 图标显示不对（白角、旧图）**：多半是系统的图标缓存，换版本后不会自动刷新。管理员 PowerShell 里跑：
 
