@@ -205,6 +205,14 @@ impl Config {
         self.layout
             .entry(self.name.clone())
             .or_insert_with(|| Rect::new(0, 0, w, h));
+        // 本机的尺寸永远跟着真实屏幕走：换了显示器、或者从单屏后台（只报主屏尺寸）
+        // 升级上来时，旧配置里那个 1920 的矩形会让跨屏判定错位。
+        if let Some(r) = self.layout.get_mut(&self.name) {
+            if r.w != w || r.h != h {
+                r.w = w;
+                r.h = h;
+            }
+        }
         let me = self.layout.get(&self.name).copied().unwrap_or(Rect::new(0, 0, w, h));
         let edges = self.edges.clone();
         for peer in &self.peers {

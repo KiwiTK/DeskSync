@@ -28,6 +28,10 @@ pub struct Session {
     pub mode: Mode,
     pub w: f64,
     pub h: f64,
+    /// 虚拟桌面原点：Windows 多显示器下鼠标坐标以主屏左上为 0,0，副屏在左边/上边时为负。
+    /// 捕获进来的坐标已经减掉它，注入时要加回去。
+    ox: f64,
+    oy: f64,
     pub self_name: String,
     /// 每台机器在虚拟画布上的矩形（含本机）。邻居的尺寸会被 Hello 校正成真实分辨率。
     pub layout: HashMap<String, Rect>,
@@ -53,6 +57,8 @@ impl Session {
             mode: Mode::Local,
             w,
             h,
+            ox: 0.0,
+            oy: 0.0,
             self_name,
             layout,
             peers: HashMap::new(),
@@ -67,6 +73,13 @@ impl Session {
             pressed: HashSet::new(),
             hidden: false,
         }
+    }
+
+    /// Windows 多显示器：告诉会话鼠标坐标系的原点偏移，注入时加回来。
+    /// 不调用就是 0,0，行为跟以前一致。
+    pub fn set_origin(&mut self, ox: f64, oy: f64) {
+        self.ox = ox;
+        self.oy = oy;
     }
 
     pub fn connect(&mut self, name: String, tx: Sender<Frame>) {
@@ -146,19 +159,29 @@ impl Session {
     }
 
     fn warp(&self, x: f64, y: f64) {
+        // 会话里的坐标是「减过原点」的，注入要还原成系统坐标。
         let _ = rdev::simulate(&EventType::MouseMove {
-            x: clamp(x, 1.0, self.w - 1.0),
-            y: clamp(y, 1.0, self.h - 1.0),
+            x: clamp(x, 1.0, self.w - 1.0) + self.ox,
+            y: clamp(y, 1.0, self.h - 1.0) + self.oy,
         });
     }
 
     fn inject(&mut self, ev: &EventType) {
-        let _ = rdev::simulate(ev);
         match ev {
             EventType::MouseMove { x, y } => {
+                let _ = rdev::simulate(&EventType::MouseMove {
+                    x: *x + self.ox,
+                    y: *y + self.oy,
+                });
+                // 记下来的是会话坐标，后面跟捕获到的坐标（同样减过原点）比。
                 self.injected_pos = Some((*x, *y));
                 self.injected_at = Some(Instant::now());
             }
+            other => {
+                let _ = rdev::simulate(other);
+            }
+        }
+        match ev {
             EventType::KeyPress(k) => self.injected_key = Some((*k, Instant::now())),
             EventType::ButtonPress(b) => self.injected_button = Some((*b, Instant::now())),
             _ => {}

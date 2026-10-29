@@ -9,6 +9,7 @@ mod discovery;
 mod identity;
 mod log;
 mod proto;
+mod screen;
 mod session;
 mod status;
 mod transport;
@@ -136,15 +137,25 @@ fn run(no_input: bool) -> std::io::Result<()> {
         c
     });
     let id = Identity::load_or_create(&cfg.name)?;
+    // Windows 多显示器：rdev 只报主屏尺寸，鼠标坐标却是整个虚拟桌面的，
+    // 直接用会让贴边判定在显示器接缝处乱触发。优先读虚拟桌面矩形。
+    let geom = screen::geometry();
     let (w, h) = match cfg.screen {
         Some((sw, sh)) => (sw as f64, sh as f64),
-        None => {
-            let (sw, sh) = rdev::display_size().map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("读取屏幕尺寸失败: {e:?}"))
-            })?;
-            (sw as f64, sh as f64)
-        }
+        None => match geom {
+            Some(g) => (g.w as f64, g.h as f64),
+            None => {
+                let (sw, sh) = rdev::display_size().map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("读取屏幕尺寸失败: {e:?}"))
+                })?;
+                (sw as f64, sh as f64)
+            }
+        },
     };
+    // 虚拟桌面原点（副屏在左/上时坐标为负）：捕获到的坐标减掉它，注入时加回来。
+    let (ox, oy) = geom
+        .map(|g| (g.x as f64, g.y as f64))
+        .unwrap_or((0.0, 0.0));
 
     let trust = Arc::new(Mutex::new(TrustState {
         trusted: cfg.trusted.clone(),
@@ -157,10 +168,14 @@ fn run(no_input: bool) -> std::io::Result<()> {
     let screen = (w.round() as u32, h.round() as u32);
     cfg.ensure_layout(screen);
     let mut session = Session::new(w, h, cfg.name.clone(), cfg.layout.clone());
+    session.set_origin(ox, oy);
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
 
     println!("DeskSync 已启动");
     println!("  名称 {}  端口 {}  屏幕 {}x{}", cfg.name, cfg.port, w, h);
+    if ox != 0.0 || oy != 0.0 {
+        crate::log::write(&format!("多显示器：虚拟桌面原点 ({ox}, {oy})，尺寸 {w}x{h}"));
+    }
     println!("  证书指纹 {}", id.fingerprint);
     println!("  配置文件 {}", Config::path().display());
     crate::log::write(&format!(
@@ -232,6 +247,9 @@ fn run(no_input: bool) -> std::io::Result<()> {
     let dial_tx = msg_tx.clone();
     let dial_connected = connected.clone();
     let dial_screen = screen;
+    // 广播发现到的邻居，界面拿去显示「一键添加」。
+    let discovered: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let discovered_dial = discovered.clone();
     thread::spawn(move || {
         let mut seen: HashMap<String, (IpAddr, u16)> = HashMap::new();
         for (name, addr) in &dial_peers {
@@ -243,7 +261,10 @@ fn run(no_input: bool) -> std::io::Result<()> {
         }
         loop {
             while let Ok((name, ip, port)) = beacon_rx.try_recv() {
-                seen.insert(name, (ip, port));
+                seen.insert(name.clone(), (ip, port));
+                if let Ok(mut d) = discovered_dial.lock() {
+                    d.insert(name, format!("{ip}:{port}"));
+                }
             }
             let busy = dial_connected.lock().unwrap().clone();
             for (name, (ip, port)) in seen.iter() {
@@ -285,7 +306,14 @@ fn run(no_input: bool) -> std::io::Result<()> {
     loop {
         match msg_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(msg) => match msg {
-                Msg::Input(ev) => session.handle_local(&ev),
+                Msg::Input(mut ev) => {
+                    // 系统给的鼠标坐标是虚拟桌面的，换算成本机会话坐标（减原点）。
+                    if let rdev::EventType::MouseMove { x, y } = &mut ev {
+                        *x -= ox;
+                        *y -= oy;
+                    }
+                    session.handle_local(&ev)
+                }
                 Msg::Frame(peer, frame) => {
                     if let Frame::Clipboard { text } = &frame {
                         clipboard.adopt(text);
@@ -347,6 +375,18 @@ fn run(no_input: bool) -> std::io::Result<()> {
             }
 
             let names: Vec<String> = connected.lock().unwrap().iter().cloned().collect();
+            let mut seen: Vec<status::Discovered> = discovered
+                .lock()
+                .map(|d| {
+                    d.iter()
+                        .map(|(name, addr)| status::Discovered {
+                            name: name.clone(),
+                            addr: addr.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            seen.sort_by(|a, b| a.name.cmp(&b.name));
             let _ = status::write_status(&status::Status {
                 name: cfg.name.clone(),
                 port: cfg.port,
@@ -356,6 +396,9 @@ fn run(no_input: bool) -> std::io::Result<()> {
                 mode: session.mode_str(),
                 connected: names,
                 written_ms: 0,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                pid: std::process::id(),
+                discovered: seen,
             });
         }
 

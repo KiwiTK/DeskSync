@@ -28,6 +28,13 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 局域网上广播发现到的邻居。UI 拿它做一键添加，省得手打 IP。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Discovered {
+    pub name: String,
+    pub addr: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub name: String,
@@ -35,6 +42,15 @@ pub struct Status {
     pub fingerprint: String,
     pub screen: (u32, u32),
     pub paused: bool,
+    /// 后台服务自己的版本号。和界面版本对不上，说明装了新版但旧后台还赖着，跨屏不会生效。
+    #[serde(default)]
+    pub version: String,
+    /// 后台服务的 pid：界面照着它就能把不肯退的旧进程干掉。
+    #[serde(default)]
+    pub pid: u32,
+    /// 广播发现到的邻居（名字 + ip:port）。
+    #[serde(default)]
+    pub discovered: Vec<Discovered>,
     /// `local`：操作本机；`forwarding:name`：正在控制谁；`controlled:name`：被谁控制。
     pub mode: String,
     pub connected: Vec<String>,

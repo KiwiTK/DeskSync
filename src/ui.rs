@@ -188,6 +188,13 @@ struct UiApp {
     quitting: bool,
     /// 布局画布的草稿（虚拟画布矩形，含本机）。保存时写进配置。
     layout_draft: HashMap<String, Rect>,
+    /// 后台服务自报的版本与 pid：版本和本程序对不上，说明旧后台还赖着。
+    daemon_version: String,
+    daemon_pid: u32,
+    /// 局域网广播发现到的邻居（名字 + ip:port）。
+    discovered: Vec<status::Discovered>,
+    /// 手动查出来的、占着本端口的旧进程 pid。
+    port_blocked: Option<u32>,
 }
 
 impl UiApp {
@@ -202,7 +209,43 @@ impl UiApp {
             tray_error: None,
             quitting: false,
             layout_draft: HashMap::new(),
+            daemon_version: String::new(),
+            daemon_pid: 0,
+            discovered: Vec::new(),
+            port_blocked: None,
         }
+    }
+
+    /// 彻底退出：先通知后台服务退出，等一小会儿还赖着就按 pid 强杀，然后自己关窗。
+    fn quit_all(&mut self, ctx: &egui::Context) {
+        self.poke(status::UiCommand {
+            pause: None,
+            reclaim: false,
+            quit: true,
+        });
+        // 后台服务最多 300ms 后才读到指令，给它一秒时间自己走。
+        std::thread::sleep(Duration::from_millis(900));
+        if self.daemon_pid > 0 {
+            let _ = kill_pid(self.daemon_pid);
+        }
+        self.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// 后台服务版本和本程序不一致（装了新版但旧进程没死）时，按 pid 换掉它。
+    fn restart_daemon(&mut self) {
+        if self.daemon_pid > 0 {
+            let _ = kill_pid(self.daemon_pid);
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        match spawn_daemon() {
+            Ok(()) => self.notice = format!("后台服务已重启为 v{}。", env!("CARGO_PKG_VERSION")),
+            Err(e) => self.notice = format!("重启失败: {e}"),
+        }
+        self.daemon_pid = 0;
+        self.daemon_version.clear();
+        self.status = None;
+        self.last_poll = Instant::now() - Duration::from_secs(9);
     }
 
     /// 第一帧才建托盘：此时 NSApplication 已经在跑，NSStatusItem 可以安全创建。
@@ -247,35 +290,51 @@ impl UiApp {
         let Some(tray) = self.tray.as_ref() else {
             return;
         };
+        // 先把事件收成动作：quit_all 要 &mut self，不能捏着 tray 的借用不放。
+        enum Act {
+            Open,
+            Pause,
+            Reclaim,
+            Quit,
+        }
+        let mut acts: Vec<Act> = Vec::new();
         while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if ev.id == *tray.open.id() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                acts.push(Act::Open);
             } else if ev.id == *tray.pause.id() {
-                let paused = self.status.as_ref().map(|s| s.paused).unwrap_or(false);
-                self.poke(status::UiCommand {
-                    pause: Some(!paused),
-                    reclaim: false,
-                    quit: false,
-                });
+                acts.push(Act::Pause);
             } else if ev.id == *tray.reclaim.id() {
-                self.poke(status::UiCommand {
-                    pause: None,
-                    reclaim: true,
-                    quit: false,
-                });
+                acts.push(Act::Reclaim);
             } else if ev.id == *tray.quit.id() {
-                self.poke(status::UiCommand {
-                    pause: None,
-                    reclaim: false,
-                    quit: true,
-                });
-                // 标记「真的要退」，关窗时不再被拦截成隐藏。
-                self.quitting = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                acts.push(Act::Quit);
             }
         }
         let _ = tray_icon::TrayIconEvent::receiver().try_recv();
+
+        for act in acts {
+            match act {
+                Act::Open => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                Act::Pause => {
+                    let paused = self.status.as_ref().map(|s| s.paused).unwrap_or(false);
+                    self.poke(status::UiCommand {
+                        pause: Some(!paused),
+                        reclaim: false,
+                        quit: false,
+                    });
+                }
+                Act::Reclaim => {
+                    self.poke(status::UiCommand {
+                        pause: None,
+                        reclaim: true,
+                        quit: false,
+                    });
+                }
+                Act::Quit => self.quit_all(ctx),
+            }
+        }
     }
 }
 
@@ -287,6 +346,11 @@ impl eframe::App for UiApp {
         if self.last_poll.elapsed() > Duration::from_millis(400) {
             self.last_poll = Instant::now();
             self.status = status::read_status();
+            if let Some(s) = &self.status {
+                self.daemon_version = s.version.clone();
+                self.daemon_pid = s.pid;
+                self.discovered = s.discovered.clone();
+            }
         }
 
         // 点关闭只是藏到菜单栏；托盘「退出」或 Cmd+Q 才真的退出。
@@ -359,7 +423,11 @@ impl eframe::App for UiApp {
                         quit: false,
                     });
                 }
+                if ui.button("退出 DeskSync").clicked() {
+                    self.quit_all(ctx);
+                }
             });
+            ui.small("点窗口右上角的 × 只是藏到系统托盘，后台继续共享；要彻底退出用上面这个按钮或托盘菜单里的「退出」。");
             if !self.notice.is_empty() {
                 ui.colored_label(egui::Color32::from_rgb(40, 120, 90), &self.notice);
             }
@@ -414,6 +482,50 @@ impl UiApp {
                 }
             });
         });
+
+        // 装了新版但旧后台没死：它占着端口、也听不懂新协议，跨屏必然失效。
+        if !self.daemon_version.is_empty() && self.daemon_version != env!("CARGO_PKG_VERSION") {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(200, 70, 70),
+                    format!(
+                        "后台服务还是 v{}（本程序 v{}）：旧进程没退掉，跨屏不会生效",
+                        self.daemon_version,
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                );
+                if ui.button("重启后台服务").clicked() {
+                    self.restart_daemon();
+                }
+            });
+        }
+
+        // 后台起不来又读不到状态：多半是旧版进程占着端口（安装器关不掉它）。
+        if !alive {
+            ui.horizontal_wrapped(|ui| {
+                if ui.small_button("检查端口是否被旧进程占用").clicked() {
+                    self.port_blocked = port_owner(self.cfg.port);
+                    self.notice = match self.port_blocked {
+                        Some(pid) => format!(
+                            "端口 {} 被进程 {pid} 占着（多半是没退干净的旧版后台），可以结束它。",
+                            self.cfg.port
+                        ),
+                        None => format!("端口 {} 没被占用，可以直接启动服务。", self.cfg.port),
+                    };
+                }
+                if let Some(pid) = self.port_blocked {
+                    if ui.button("结束它并重启服务").clicked() {
+                        let _ = kill_pid(pid);
+                        std::thread::sleep(Duration::from_millis(400));
+                        match spawn_daemon() {
+                            Ok(()) => self.notice = "旧进程已结束，后台服务已重启。".to_string(),
+                            Err(e) => self.notice = format!("重启失败: {e}"),
+                        }
+                        self.port_blocked = None;
+                    }
+                }
+            });
+        }
 
         if let Some(s) = &self.status {
             ui.horizontal_wrapped(|ui| {
@@ -695,6 +807,40 @@ impl UiApp {
             }
         });
         ui.small("地址形如 192.168.1.20:24987；留空则靠局域网广播发现。");
+
+        // 广播发现到的机器直接点一下就加，不用手打 IP。
+        if !self.discovered.is_empty() {
+            ui.add_space(6.0);
+            ui.label("局域网里发现到的机器");
+            let mut add: Option<(String, String)> = None;
+            for d in &self.discovered {
+                let known = self.cfg.peers.iter().any(|p| p.name == d.name);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&d.name).strong());
+                    ui.label(&d.addr);
+                    if known {
+                        ui.small("（已在邻居列表）");
+                    } else if ui.small_button("添加为邻居").clicked() {
+                        add = Some((d.name.clone(), d.addr.clone()));
+                    }
+                });
+            }
+            if let Some((name, addr)) = add {
+                self.cfg.peers.push(Peer {
+                    name: name.clone(),
+                    addr: Some(addr),
+                });
+                let screen = self.screen_size();
+                self.cfg.ensure_layout(screen);
+                self.layout_draft = self.cfg.layout.clone();
+                self.notice = format!("已添加 {name}，在「屏幕布局」里把它拖到本机旁边（出现黄线）后保存。");
+            }
+        } else if status::daemon_alive() {
+            ui.small(
+                "还没收到邻居的广播。确认两台机器在同一局域网、端口一致，\
+                 且防火墙放行了 UDP 24986（发现）与 TCP 24987（数据）。",
+            );
+        }
     }
 
     fn draw_trust(&mut self, ui: &mut egui::Ui) {
@@ -781,5 +927,66 @@ fn spawn_daemon() -> io::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
+    Ok(())
+}
+
+/// 谁占着这个端口（LISTENING 的进程 pid）。旧版后台赖着不退时，
+/// status.json 已经读不出来了，只能从端口反查 pid 再动手。
+fn port_owner(port: u16) -> Option<u32> {
+    let out = if cfg!(windows) {
+        std::process::Command::new("netstat")
+            .args(["-ano", "-p", "TCP"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?
+            .stdout
+    } else {
+        let out = std::process::Command::new("lsof")
+            .args(["-ti", &format!("tcp:{port}")])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        return text.lines().filter_map(|l| l.trim().parse::<u32>().ok()).next();
+    };
+
+    let text = String::from_utf8_lossy(&out);
+    for line in text.lines() {
+        // 例：  TCP    0.0.0.0:24987    0.0.0.0:0    LISTENING    12345
+        if !line.contains("LISTENING") || !line.contains(&format!(":{port}")) {
+            continue;
+        }
+        if let Some(pid) = line.split_whitespace().last().and_then(|p| p.parse::<u32>().ok()) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// 按 pid 结束进程。通知后台退出后它还赖着（多半是装新版时旧进程没被杀掉）时的兜底。
+fn kill_pid(pid: u32) -> io::Result<()> {
+    let me = std::process::id();
+    if pid == 0 || pid == me {
+        return Ok(());
+    }
+    crate::log::write(&format!("按 pid 结束进程 {pid}"));
+    let pid_s = pid.to_string();
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("taskkill");
+        c.args(["/F", "/PID", &pid_s]);
+        c
+    } else {
+        let mut c = std::process::Command::new("kill");
+        c.args(["-9", &pid_s]);
+        c
+    };
+    let _ = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
     Ok(())
 }
